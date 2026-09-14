@@ -1,0 +1,40 @@
+{
+  "_readme": [
+    "统一配置：WorkBuddy 账号 + Trae 账号 + 通知，全部放一个文件。",
+    "JSON 不支持 // 或 # 注释，说明一律写在 _ 开头字段，脚本会忽略它们。",
+    "本文件可安全提交；真实凭据请写在同目录 config.json（已被 .gitignore 屏蔽）。"
+  ],
+  "accounts": [
+    {
+      "enabled": true,
+      "name": "WorkBuddy 账号显示名（自定义，仅用于日志）",
+      "access_token": "【必填·敏感】或用 python checkin.py --init-workbuddy 自动导入",
+      "uid": "【可选】用户 UID",
+      "domain": "www.workbuddy.cn",
+      "enterprise_id": "【可选】企业版账号才需要，个人版留空字符串",
+      "api_base": "https://www.codebuddy.cn"
+    }
+  ],
+  "trae_accounts": [
+    {
+      "enabled": true,
+      "userId": "【Trae 用户 ID，首次 --init-trae 后自动写入】",
+      "screenName": "Trae 显示名（可留空）",
+      "accessToken": "【由 --init-trae 写入，敏感】",
+      "refreshToken": "【由 --init-trae 写入，敏感】",
+      "expiresAt": 0,
+      "deviceId": "【由 --init-trae 写入】",
+      "claimDeviceId": "【由 --init-trae 写入；同一真实设备每天只能签一个账号】",
+      "fingerprint": { "brand": "Apple", "type": "mac", "os": "macOS" },
+      "_comment": "首次使用请在本机运行：python checkin.py --init-trae（需浏览器 + 装过 Trae 客户端）"
+    }
+  ],
+  "notify": {
+    "_comment": [
+      "通知由 checkin.py 内置处理：当日首次成功推一次；失败按每天上限 + 最小间隔限流。",
+      "可调环境变量：AICREDIT_MAX_FAIL_ALERTS（条数）、AICREDIT_FAIL_ALERT_INTERVAL（分钟）。"
+    ],
+    "webhook": { "url": "【可选】群机器人/Server酱/钉钉/飞书/Bark 地址" },
+    "wecom": { "corpid": "", "corpsecret": "", "agentid": "", "touser": "@all" }
+  }
+}

@@ -1,0 +1,27 @@
+# ===== 凭据与真实配置：绝不入库 =====
+config.json
+config.json.*
+*.bak
+*.token
+!config.json.example
+
+# ===== 运行产物 =====
+checkin.log
+*.log
+.checkin_state.json
+
+# ===== 工作区记忆（本地私有，含会话与自动化记录）=====
+.workbuddy/
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ===== 编辑器 / 操作系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
