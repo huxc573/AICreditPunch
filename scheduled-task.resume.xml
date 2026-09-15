@@ -1,0 +1,73 @@
+<!--
+  AICreditPunch - wake-up trigger task template.
+
+  Registered by checkin.bat as AICreditPunch-Resume. checkin.bat replaces the two
+  placeholders before handing this file to Register-ScheduledTask -Xml:
+
+    __CHECKIN_BAT__   absolute path of checkin.bat in the project folder
+    __USER__          the current user name (interactive token, no password stored)
+
+  Why XML: New-ScheduledTaskTrigger cannot express an event trigger, and this is
+  the only trigger type that fires on resume. Laptops rarely log a plain "logon"
+  when they wake up - the session is restored, not created - so the logon task
+  never fires and the resume has to be observed from the event log instead.
+
+  Subscription: Microsoft-Windows-Kernel-Power event 107, "the system has resumed
+  from sleep". It covers classic sleep (S3) and hibernate (S4) resume, and was
+  confirmed against this machine's own System log (2026-09-12 .. 2026-09-15).
+  Microsoft-Windows-Power-Troubleshooter event 1 is OR-ed in as a fallback: this
+  machine never logs it, but other machines do, and a filter that matches nothing
+  is harmless. Systems using modern standby (S0ix) may log a different id; check
+  "Get-WinEvent -FilterHashtable @{LogName='System'; Id=107,507}" on such a host
+  before relying on this task there.
+
+  Do NOT add an <?xml?> declaration back: Register-ScheduledTask -Xml takes a
+  string, and a string starting with a declaration is rejected with
+  "The task XML is malformed. (1,40) 错误: 无法切换编码" even though the XML
+  itself is valid. The declaration is only needed when a file is handed to
+  schtasks /create /xml, which this project does not do.
+
+  Keep this file ASCII-only: it is read with [IO.File]::ReadAllText while the
+  console code page may be GBK.
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>__USER__</Author>
+    <Description>AICreditPunch: run the check-in right after the PC resumes from sleep or hibernate. Runs as the logged-on user with an interactive token, so no password is stored. Registered by checkin.bat.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <EventTrigger>
+      <Enabled>true</Enabled>
+      <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="System"&gt;&lt;Select Path="System"&gt;*[System[(Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=107) or (Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1)]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
+      <Delay>PT15S</Delay>
+    </EventTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>__USER__</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>cmd.exe</Command>
+      <Arguments>/c "__CHECKIN_BAT__"</Arguments>
+    </Exec>
+  </Actions>
+</Task>

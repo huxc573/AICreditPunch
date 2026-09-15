@@ -6,6 +6,55 @@
 
 ---
 
+## [未发布] - 2026-09-15 09:14
+
+版本号待定：本次既有缺陷修复又有新功能，建议按 MINOR 发 `v1.8.0`。
+
+### 修复
+
+- **Trae「今日已签到」误判（严重，签到实际从未发出）**：`_trae_already()` 末尾用业务码兜底
+  （`_code_of(payload) in (0, 200)` → 已签到），但 status 在**未签到**时同样返回
+  `code=0` / `message=success`，于是每次运行都判定「今日已签到」，`提交签到` 一次都没执行过。
+  实测报文：`{"checked_in": false, "code": 0, "credits": 150, "did_checked_in": false,
+  "enable": true, "extra_credits": 50, "message": "success"}`。
+  现在拆成 `_trae_status_checked()`（只认明确标记 `checked_in` 等与明确文案，**不看业务码**）
+  与 `_trae_claim_ok()`（claim 的 `code=0/200` 才算领奖成功），字段读取统一走 `_trae_flag()`。
+- **领奖后回查确认**（与 WorkBuddy 同口径）：`提交签到` → `签到已受理，回查确认`
+  （按 `TRAE_VERIFY_WAITS = (0, 4)` 回查两次）→ 确认到账才写 `签到成功`；
+  回查仍未确认则记 `回查未确认签到` 并进入重试，不再出现「日志绿、平台没签」的假成功。
+- **`--status-only` 不再把查询失败说成待签到**：status 请求失败时返回 `状态查询失败`。
+- 积分文案：`本次 +N` 由 `credits + extra_credits` 计算，只在真的已签到 / 签到成功时才输出。
+
+### 新增
+
+- **唤醒补签任务 `AICreditPunch-Resume`**：订阅 `Microsoft-Windows-Kernel-Power` **事件 ID 107**
+  （睡眠 / 休眠恢复），恢复后 15s 触发完整签到（`Delay=PT15S`）；另把
+  `Microsoft-Windows-Power-Troubleshooter` 事件 ID 1 一起 `OR` 进订阅以兼容其它机器
+  （本机不记该事件，匹配不到也无害）。以当前用户 + 交互式令牌运行（**不存密码**），
+  `MultipleInstancesPolicy=IgnoreNew`、`ExecutionTimeLimit=PT10M`、`RunLevel=Limited`。
+- **`scheduled-task.resume.xml`**：该任务的 XML 模板 —— `New-ScheduledTaskTrigger` 无法表达
+  事件触发器，只能走 XML 注册；占位符 `__CHECKIN_BAT__` / `__USER__` 由 `checkin.bat` 替换。
+- `checkin.py` 的 `TASK_RESUME` 常量、`--tasks`、`--today` 与 `checkin.bat` 的
+  `:register_tasks` / `:tasks_ok` / `--uninstall` / 帮助文案全部覆盖第三个任务。
+
+### 验证
+
+- Trae 真机（09:09）：`checked_in=false` → `提交签到` → 回查 `checked_in=true` →
+  `签到成功；本次 +200，当前积分余额 184`；修复前 `.checkin_state.json` 里的
+  `success_date_trae` 是**假**成功记录，现已名副其实。
+- 计划任务：`checkin.bat --install` 注册三个任务，`--tasks` 汇总 `3/3 正常`；
+  `schtasks /run /tn "AICreditPunch-Resume"` 按需触发一次，日志新增一整块完整签到。
+- 真实唤醒验证待做：睡眠 → 唤醒后看 `--tasks` 的「上次运行」是否更新。
+
+### 已知与限制
+
+- `Register-ScheduledTask -Xml` **不接受带 `<?xml?>` 声明的字符串**
+  （`The task XML is malformed. (1,40) 错误: 无法切换编码`），模板已去掉声明并在文件头注明原因。
+- 本机 System 日志只有 `Kernel-Power` 107（无 `Power-Troubleshooter`）；**现代待机（S0ix）**
+  的机器可能记其它 ID，换机器按 README §3.3 的命令先确认再改订阅。
+- Trae 签到后 `usage_summary.total_amount` 增加 150（800 → 950），而 status 声明的
+  `credits + extra_credits` 是 200；`本次 +200` 沿用平台口径，未按余额差改写。
+
 ## [v1.7.0] - 2026-09-14 23:07
 
 `checkin.py` 的 WorkBuddy 段（约 400 行）**按接口行为独立重写**，不再包含上游代码 ——

@@ -6,16 +6,24 @@ rem  AICreditPunch - Windows entry point
 rem
 rem    checkin.bat               run the check-in and auto-install the tasks
 rem    checkin.bat --install     reinstall the scheduled tasks
-rem    checkin.bat --uninstall   remove both scheduled tasks
+rem    checkin.bat --uninstall   remove all three scheduled tasks
 rem    checkin.bat --logs        open the local log in notepad
 rem    checkin.bat --help        show usage
+rem
+rem  Three scheduled tasks are managed here (see README section 3.3):
+rem    AICreditPunch-Daily     six daily triggers, StartWhenAvailable
+rem    AICreditPunch-Startup   at user logon
+rem    AICreditPunch-Resume    on resume from sleep or hibernate; it is
+rem                            registered from scheduled-task.resume.xml
+rem                            because New-ScheduledTaskTrigger cannot
+rem                            express an event trigger
 rem
 rem  Every subcommand is --prefixed. Only help keeps a short spelling:
 rem  --help, -h, /? and plain help all print the usage. The bare words
 rem  install, uninstall and logs are NOT valid any more.
 rem
 rem  Any other --option is forwarded to checkin.py unchanged, e.g.
-rem    checkin.bat --tasks         check the two scheduled tasks, read-only
+rem    checkin.bat --tasks         check the three scheduled tasks, read-only
 rem    checkin.bat --today         daily view - today's status and last run
 rem    checkin.bat --status-only   query the platforms without claiming
 rem    checkin.bat --version       print the script version
@@ -52,6 +60,7 @@ for %%I in ("%LOGFILE%") do set "LOG_DIR=%%~dpI"
 set "OPEN_LOG_FLAG=%LOG_DIR%.AICreditPunch.openlog"
 set "TASK_DAILY=AICreditPunch-Daily"
 set "TASK_STARTUP=AICreditPunch-Startup"
+set "TASK_RESUME=AICreditPunch-Resume"
 set "CHECKIN_TIMES=08:45 11:45 14:45 17:45 20:45 23:45"
 set "REG_FAILED="
 set "LOG_OPENED="
@@ -254,7 +263,14 @@ set "PSREG=%PSREG%$s=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStar
 set "PSREG=%PSREG%$p=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited;"
 set "PSREG=%PSREG%$t=@();foreach($h in '08:45','11:45','14:45','17:45','20:45','23:45'){$t+=New-ScheduledTaskTrigger -Daily -At $h};"
 set "PSREG=%PSREG%Register-ScheduledTask -TaskName '%TASK_DAILY%' -Action $a -Settings $s -Principal $p -Trigger $t -Force -ErrorAction Stop|Out-Null;"
-set "PSREG=%PSREG%Register-ScheduledTask -TaskName '%TASK_STARTUP%' -Action $a -Settings $s -Principal $p -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME) -Force -ErrorAction Stop|Out-Null"
+set "PSREG=%PSREG%Register-ScheduledTask -TaskName '%TASK_STARTUP%' -Action $a -Settings $s -Principal $p -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME) -Force -ErrorAction Stop|Out-Null;"
+rem The resume task needs an EVENT trigger, which New-ScheduledTaskTrigger cannot
+rem express, so it comes from an XML template. [IO.File]::ReadAllText reads it
+rem without BOM surprises; $d is the project folder reused from above.
+set "PS_RESUME_XML=%SCRIPT_DIR%\scheduled-task.resume.xml"
+set "PSREG=%PSREG%$rx=[IO.File]::ReadAllText($env:PS_RESUME_XML);"
+set "PSREG=%PSREG%$rx=$rx.Replace('__CHECKIN_BAT__',$d+'\checkin.bat').Replace('__USER__',$env:USERNAME);"
+set "PSREG=%PSREG%Register-ScheduledTask -TaskName '%TASK_RESUME%' -Xml $rx -Force -ErrorAction Stop|Out-Null"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "%PSREG%" >nul 2>&1
 call :now
 call :tasks_ok
@@ -263,7 +279,7 @@ if errorlevel 1 (
     call :say WARN: task registration failed - opening the log in notepad.
     call :say WARN: run this once from an account that may manage tasks; see README section 3.
 ) else (
-    call :say Scheduled tasks registered OK: %TASK_DAILY% six times a day, %TASK_STARTUP% at logon.
+    call :say Scheduled tasks registered OK: %TASK_DAILY% six times a day, %TASK_STARTUP% at logon, %TASK_RESUME% on wake.
 )
 exit /b 0
 
@@ -277,6 +293,10 @@ call :task_points_here "%TASK_DAILY%"
 if errorlevel 1 exit /b 1
 call :task_points_here "%TASK_STARTUP%"
 if errorlevel 1 exit /b 1
+schtasks /query /tn "%TASK_RESUME%" >nul 2>&1
+if errorlevel 1 exit /b 1
+call :task_points_here "%TASK_RESUME%"
+if errorlevel 1 exit /b 1
 exit /b 0
 
 :task_points_here
@@ -288,7 +308,7 @@ echo.
 echo Removing AICreditPunch scheduled tasks ...
 echo.
 set "RC=0"
-for %%T in (%TASK_DAILY% %TASK_STARTUP%) do call :delete_task "%%T"
+for %%T in (%TASK_DAILY% %TASK_STARTUP% %TASK_RESUME%) do call :delete_task "%%T"
 echo.
 if "%RC%"=="0" (
     echo Done. The log file was kept: "%LOGFILE%"
@@ -321,7 +341,7 @@ echo AICreditPunch - daily check-in for WorkBuddy + Trae
 echo.
 echo   checkin.bat                 run the check-in and auto-install the tasks
 echo   checkin.bat --install       reinstall the scheduled tasks
-echo   checkin.bat --uninstall     remove both scheduled tasks
+echo   checkin.bat --uninstall     remove all three scheduled tasks
 echo   checkin.bat --logs          open the local log in notepad
 echo   checkin.bat --tasks         check the scheduled tasks, read-only
 echo   checkin.bat --today         daily view: today status + last run
@@ -335,6 +355,7 @@ echo.
 echo Scheduled tasks used by this script:
 echo   %TASK_DAILY%    six times a day: %CHECKIN_TIMES%
 echo   %TASK_STARTUP%  once at user logon
+echo   %TASK_RESUME%   on resume from sleep or hibernate
 echo.
 echo Log file : %LOGFILE%  - newest run on top
 echo Folder   : %SCRIPT_DIR%

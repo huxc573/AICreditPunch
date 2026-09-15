@@ -42,6 +42,7 @@ AICreditPunch/
 │
 ├── checkin.py             唯一脚本：签到 + 初始化 + 通知（WorkBuddy + Trae，单文件零依赖）
 ├── checkin.bat            Windows 计划任务入口（ASCII + CRLF，网络等待 + 任务自管理）
+├── scheduled-task.resume.xml  唤醒触发任务的 XML 模板（事件触发器，由 checkin.bat 注册）
 ├── config.json.example    脱敏配置模板（可入库）
 ├── .gitignore             凭据与运行产物防护
 │
@@ -55,6 +56,7 @@ AICreditPunch/
 |---|---|---|
 | `checkin.py` | 唯一脚本：签到 + 初始化（`--init-*`）+ 内置通知 | 否 |
 | `checkin.bat` | 计划任务入口；子命令 `--install` / `--uninstall` / `--tasks` / `--today` / `--help`，其它 `--xxx` 转发给 `checkin.py` | 否 |
+| `scheduled-task.resume.xml` | `AICreditPunch-Resume` 的 XML 模板：`Kernel-Power` 事件 ID 107（睡眠/休眠恢复）触发器 | 否 |
 | `config.json.example` | 脱敏模板 | 否 |
 | `LICENSE` | MIT 许可全文 | 否 |
 | `THIRD-PARTY-NOTICES.md` | 第三方组件声明（上游 MIT 版权行与全文） | 否 |
@@ -168,7 +170,7 @@ python checkin.py --status-only        # 只查状态，不领取（可反复执
 python checkin.py --dry-run            # 只校验配置，不发网络请求
 python checkin.py --debug              # 打印脱敏的原始响应，排错用
 python checkin.py --today              # 日常查看：今日状态 + 任务下一班次 + 最近一次运行（纯本地）
-python checkin.py --tasks              # 检查本脚本的两个计划任务（只读，不修改）
+python checkin.py --tasks              # 检查本脚本的三个计划任务（只读，不修改）
 
 # 初始化（每个平台一次，用法与其它参数一致）
 python checkin.py --init-workbuddy     # 导入 WorkBuddy 本机凭据（可加 --auth-file <路径>）
@@ -264,6 +266,7 @@ python checkin.py --tasks     # 等价：checkin.bat --tasks
 [Trae] 今日已签到；1 个账号；成功记录 2026-09-14
 [运行记录] 日志中今日 3 次；含计划任务触发与手动运行
 [计划任务] 已注册；下次自动运行 2026-09-14 23:45；上次 2026-09-14 20:45
+[计划任务] 唤醒触发已启用；从睡眠 / 休眠恢复时补签；上次 从未运行
 [日志文件] 最新在前；C:\Users\<你>\AppData\Roaming\AICreditPunch.log
 
 最近一次运行（日志顶部）：
@@ -280,7 +283,7 @@ python checkin.py --tasks     # 等价：checkin.bat --tasks
 | `[平台] 今日已签到 / 今日尚未签到` | 读 `.checkin_state.json` 的当日成功记录，**纯本地判断** |
 | `[平台] 今日有失败记录` | 当天出现过失败（记在 `.checkin_state.json` 里）；明细是已推送的告警条数 |
 | `[运行记录]` | 日志里当天出现过几次「…启动」（含计划任务触发与手动运行） |
-| `[计划任务]` | 主任务的下次触发时间；缺失时直接给出修复命令 |
+| `[计划任务]` | 主任务（`-Daily`）的下次触发时间；`唤醒触发已启用 / 缺失` 指睡眠恢复任务（`-Resume`）；缺失时直接给出修复命令 |
 | `最近一次运行` | 把日志最顶端那一块原样贴出来，最多 40 行 |
 
 退出码：`0` = 今日各平台都已签到；`1` = 还有未签到、平台未初始化、或计划任务缺失等待办项。
@@ -289,7 +292,7 @@ python checkin.py --tasks     # 等价：checkin.bat --tasks
 
 #### `--tasks`（计划任务检查）
 
-核对两个任务是否注册、是否指向**当前目录**的 `checkin.bat`：
+核对三个任务是否注册、是否指向**当前目录**的 `checkin.bat`：
 
 ```text
 一体化每日签到脚本 v1.7.0 启动（计划任务检查）
@@ -298,8 +301,9 @@ python checkin.py --tasks     # 等价：checkin.bat --tasks
 
 [AICreditPunch-Daily] 正常；每日 6 次（08:45、11:45、14:45、17:45、20:45、23:45）；下次 2026-09-14 23:45；上次 2026-09-14 20:45；上次结果 成功（0x0）
 [AICreditPunch-Startup] 正常；用户登录时触发；上次结果 从未运行（0x41303）
+[AICreditPunch-Resume] 正常；从睡眠 / 休眠恢复时触发；上次结果 从未运行（0x41303）
 
-汇总：2/2 个计划任务正常，均指向 D:\Dev\Workspaces\WorkBuddy\AICreditPunch\checkin.bat
+汇总：3/3 个计划任务正常，均指向 D:\Dev\Workspaces\WorkBuddy\AICreditPunch\checkin.bat
 要强制重装或修复：`checkin.bat --install`；直接跑一次 `checkin.bat` 也会自动补齐。
 ```
 
@@ -317,10 +321,10 @@ python checkin.py --tasks     # 等价：checkin.bat --tasks
 
 ```cmd
 checkin.bat               :: 跑签到；任务缺失或路径过期时自动注册
-checkin.bat --install     :: 强制重装两个任务
-checkin.bat --uninstall   :: 卸载两个任务
+checkin.bat --install     :: 强制重装三个任务
+checkin.bat --uninstall   :: 卸载三个任务
 checkin.bat --logs        :: 用记事本打开本地日志（见 §2.5）
-checkin.bat --tasks       :: 检查两个任务是否正常（只读）
+checkin.bat --tasks       :: 检查三个任务是否正常（只读）
 checkin.bat --today       :: 日常查看，见 §2.7
 checkin.bat --help        :: 查看用法
 ```
@@ -330,7 +334,7 @@ checkin.bat --help        :: 查看用法
 > 其它任何 `--xxx` 参数都会**原样转发**给 `checkin.py`，例如 `checkin.bat --status-only`、`checkin.bat --init-trae`、`checkin.bat --version`；
 > 这类转发是**只读交互**（输出直接打到控制台、不写日志），所以适合随手查看。
 
-`checkin.bat` 每次运行都会检查两个任务是否**存在**且**指向当前目录**：
+`checkin.bat` 每次运行都会检查三个任务是否**存在**且**指向当前目录**：
 
 - 缺失，或任务里存的还是**旧路径**（比如项目目录改过名）→ 自动重注册，结果写进日志；
 - 已存在且指向正确 → 跳过，不做任何改动；
@@ -342,6 +346,11 @@ checkin.bat --help        :: 查看用法
 注册通过 PowerShell 的 `Register-ScheduledTask` 完成（**普通账户权限即可**，不需要管理员），
 好处是能带上「**错过触发后尽快补跑**」（`StartWhenAvailable`）等设置。
 注意 `schtasks /create /sc onlogon` 建登录任务需要管理员权限，所以脚本内部走的是 PowerShell 那条路。
+
+`-Daily` / `-Startup` 用 `New-ScheduledTaskAction` 等 cmdlet 组装；`-Resume` 要的是**事件触发器**，
+cmdlet 表达不了，于是读 [`scheduled-task.resume.xml`](scheduled-task.resume.xml) 后走
+`Register-ScheduledTask -Xml` 注册。该模板**不能出现 `<?xml?>` 声明**：`-Xml` 收的是字符串，
+带声明会被直接拒（`The task XML is malformed. (1,40) 错误: 无法切换编码`），哪怕 XML 本身完全合法。
 
 ### 3.2 卸载
 
@@ -356,6 +365,7 @@ Removing AICreditPunch scheduled tasks ...
 
   [ OK ] AICreditPunch-Daily - removed
   [ OK ] AICreditPunch-Startup - removed
+  [ OK ] AICreditPunch-Resume - removed
 
 Done. The log file was kept: "<%APPDATA% 展开后的完整路径>\AICreditPunch.log"
 Run this file without arguments to install the tasks again.
@@ -372,6 +382,7 @@ Run this file without arguments to install the tasks again.
 |---|---|---|
 | `AICreditPunch-Daily` | 每天 08:45 / 11:45 / 14:45 / 17:45 / 20:45 / 23:45（6 个触发器） | 主签到任务，开启 `StartWhenAvailable`（错过补跑） |
 | `AICreditPunch-Startup` | 用户登录时 | 登录补跑，防止当天错过 |
+| `AICreditPunch-Resume` | **从睡眠 / 休眠恢复时**（`Kernel-Power` 事件 ID 107） | 唤醒补签；事件触发器只能走 XML（见 §3.1） |
 
 动作均为 `cmd.exe /c "<项目目录>\checkin.bat"`，以**当前用户 + 交互式令牌**运行（无需存密码）。
 
@@ -394,10 +405,24 @@ schtasks /create /tn "AICreditPunch-Daily" ^
 > **关于「开机时自动执行」的取舍**：用的是 `-AtLogOn`（用户登录时触发），而不是真正的 `-AtStartup`。
 > 后者在**用户尚未登录**时就运行，必须勾选「不管用户是否登录都要运行」——会要求输入并保存账户密码，
 > 且要放开 `config.json` 权限给 SYSTEM，凭据暴露面变大。`-AtLogOn` 无需管理员、无需存密码，够用。
+>
+> **为什么唤醒要单独一个事件触发器**：锁屏后解锁、以及休眠 / 睡眠恢复，都**不算新登录** ——
+> 会话是被原地恢复的（`SessionId` 与访问令牌都不变），`-AtLogOn` / `-AtStartup` 一概不响应，
+> 所以只能订阅系统事件。实测本机恢复只记 `Microsoft-Windows-Kernel-Power` **事件 ID 107**，
+> 订阅因此以 107 为主，另把 `Microsoft-Windows-Power-Troubleshooter` 事件 ID 1 一起 `OR` 进去兼容
+> 别的机器（匹配不到也无害）。想确认自己这台记哪些事件：
+>
+> ```powershell
+> Get-WinEvent -FilterHashtable @{LogName='System'; Id=107,507} -MaxEvents 20 |
+>   Select-Object TimeCreated, Id, ProviderName
+> ```
+>
+> 用**现代待机（S0ix）**的机器可能记的是别的 ID，先跑一次上面这条再决定订阅内容。
 
 ### 3.4 为什么一天跑 6 次是安全的
 
 - 两个平台**领取前都先查状态**，今日已签到会直接跳过，不会重复领取；
+- 唤醒触发同理：恢复后若当天已经签过，只会在日志多一条 `今日已签到，本次无需签到`，不会重复领；
 - `checkin.py` 内置通知逻辑保证**同日只推送一次成功通知**，失败推送按「每天 ≤3 条、间隔 ≥60 分钟」限流。
 
 所以高频运行只增加一点点请求，不会重复领积分、不会刷屏。这也让「关机 / 断网导致某次没跑」的漏签风险降到很低。
@@ -620,6 +645,7 @@ python checkin.py --debug          # ⑦ 打印脱敏后的响应结构
 ```cmd
 checkin.bat --tasks                :: ① 确认任务存在且指向当前目录
 schtasks /run /tn "AICreditPunch-Daily"
+schtasks /run /tn "AICreditPunch-Resume"   :: 唤醒任务也可按需试跑（真验证要真的睡一次）
 timeout /t 6 /nobreak >nul
 notepad "%APPDATA%\AICreditPunch.log"
 ```
@@ -645,6 +671,10 @@ notepad "%APPDATA%\AICreditPunch.log"
 | `[平台] 未初始化`（`--today`） | 该平台没有配置账号 | 按提示跑 `--init-workbuddy` / `--init-trae` |
 | `[AICreditPunch-Daily] 缺失`（`--tasks`） | 计划任务不存在 | 跑 `checkin.bat --install` 重装 |
 | `[AICreditPunch-Daily] 异常；动作指向 …`（`--tasks`） | 任务在，但动作指向的不是**当前目录**的 `checkin.bat`（目录改名/搬移后常见） | 跑一次 `checkin.bat` 会自动重注册；也可 `checkin.bat --install` |
+| `[AICreditPunch-Resume] 缺失`（`--tasks`） | 唤醒触发任务不在（旧版本装的，或 `scheduled-task.resume.xml` 被删） | 跑 `checkin.bat --install`，它会读 XML 模板重新注册 |
+| `The task XML is malformed. (1,40) 错误: 无法切换编码` | `scheduled-task.resume.xml` 里出现了 `<?xml?>` 声明 —— `Register-ScheduledTask -Xml` 收字符串时不允许 | 删掉模板首行声明，重新 `checkin.bat --install` |
+| 睡眠 / 休眠唤醒后没有补签 | 事件触发器没匹配上；用现代待机（S0ix）的机器常记别的 ID | 按 §3.3 的命令看本机实际记哪个 ID，改 `scheduled-task.resume.xml` 的订阅后 `--install` |
+| Trae 每次都提示 `今日已签到，本次无需签到`，平台上其实没签 | 判定 bug：status 返回的 `code=0 / message=success` 被误当成「已签到」（v1.7.0 及更早） | 升级本脚本；修好后日志会先出现 `提交签到` → `签到已受理，回查确认` → `签到成功` |
 | 计划任务「上次结果 0x1」 | bat 执行失败 | 检查 `PYEXE` 路径、编码；手动跑一次 bat |
 | 计划任务「上次结果 0x41301」 | 任务正在运行 | 正常，等待完成 |
 | 日志中文乱码 | 代码页 / 编码问题 | ① 确认 `.bat` 里有 `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`；② `.bat` **自己写**的日志行必须纯 ASCII——v1.5.0 起已杜绝 `%date%`/`%time%`（中文字符页会输出「周一」这类本地化文本，落进 UTF-8 日志即乱码）。日志里出现 `\xd6\xdc\xd2\xbb` 字节就是这条问题复发 |

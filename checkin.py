@@ -76,6 +76,7 @@ LOG_NAME = "AICreditPunch.log"
 # 改一边就得改另一边。这里只用于「检查」，Python 侧不注册任务。
 TASK_DAILY = "AICreditPunch-Daily"
 TASK_STARTUP = "AICreditPunch-Startup"
+TASK_RESUME = "AICreditPunch-Resume"
 CHECKIN_TIMES = ["08:45", "11:45", "14:45", "17:45", "20:45", "23:45"]
 ENTRY_BAT = "checkin.bat"
 ENTRY_PATH = HERE / ENTRY_BAT
@@ -897,6 +898,21 @@ TRAE_CREDITS_URL = TRAE_API_BASE + "/trae/api/v2/pay/ide_user_ent_usage"
 TRAE_REFRESH_MARGIN = 24 * 3600
 TRAE_CLAIM_RETRIES = 3
 
+# 「今日是否已签到」的判读口径。实测 status 响应（未签到时）：
+#   {"checked_in": false, "code": 0, "credits": 150, "did_checked_in": false,
+#    "enable": true, "extra_credits": 50, "message": "success"}
+# 注意 `code=0` 只代表「查询成功」——未签到时同样是 0。所以是否已签到必须
+# 只看明确标记与明确文案，**绝不能用业务码兜底**（v1.7.0 及更早正是这么错的，
+# 结果每次运行都判成「今日已签到」，claim 一次都没执行过）。
+TRAE_CHECKED_FLAGS = ("checked_in", "did_checked_in", "today_checked_in", "is_checked_in")
+TRAE_ALREADY_WORDS = ("已签到", "已经签到", "已领取", "今日已领取", "明日再来",
+                      "already checked", "already claimed")
+TRAE_CREDIT_KEYS = ("credits", "today_credit", "daily_credit", "sign_credit", "reward_credit",
+                    "credit", "reward", "score", "points",
+                    "obtain_credit", "get_credit", "add_credit", "grant_credit")
+# 领奖后回查确认的等待节奏（0 = 立即回查一次，再等 4s 回查一次）
+TRAE_VERIFY_WAITS = (0, 4)
+
 
 def _trae_headers(acc: Dict[str, Any], device_id: str) -> Dict[str, str]:
     fp = acc.get("fingerprint") or {}
@@ -1032,20 +1048,55 @@ def _trae_refresh(acc: Dict[str, Any]) -> bool:
     return True
 
 
-def _trae_already(payload: Optional[Dict[str, Any]]) -> bool:
+def _trae_flag(payload: Optional[Dict[str, Any]], keys: Tuple[str, ...]) -> Optional[bool]:
+    """在 payload / payload.data 里按 keys 顺序找布尔标记；字段不存在返回 None。
+
+    字符串 "true"/"1" 视为真、"false"/"0" 视为假，兼容把布尔序列化成字符串的接口。
+    keys 的先后就是优先级：先命中的那个字段说了算。
+    """
     if not isinstance(payload, dict):
-        return False
-    # Trae 的 status 接口直接用 checked_in 布尔字段表示今日是否已签
-    for node in (payload, payload.get("data") if isinstance(payload.get("data"), dict) else None):
-        if isinstance(node, dict) and isinstance(node.get("checked_in"), bool):
-            if node["checked_in"]:
-                return True
+        return None
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else None
+    for node in (payload, data):
+        if not isinstance(node, dict):
+            continue
+        for key in keys:
+            if key not in node:
+                continue
+            value = node[key]
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in ("true", "1", "yes"):
+                    return True
+                if text in ("false", "0", "no"):
+                    return False
+    return None
+
+
+def _trae_status_checked(payload: Optional[Dict[str, Any]]) -> bool:
+    """状态查询是否表示「今日已签到」。
+
+    只认**明确标记**（checked_in 等）与**明确文案**；业务码一概不看。
+    Trae 的 status 在「未签到」时同样返回 code=0 / message=success，
+    拿业务码兜底就会把「每次查询成功」当成「今天已经签过」。
+    """
+    flag = _trae_flag(payload, TRAE_CHECKED_FLAGS)
+    if flag is not None:
+        return flag
     msg = _msg_of(payload).lower()
-    if any(t in msg for t in ("已签到", "已领取", "明日再来", "already", "checked", "claimed")):
+    return any(word in msg for word in TRAE_ALREADY_WORDS)
+
+
+def _trae_claim_ok(payload: Optional[Dict[str, Any]]) -> bool:
+    """领奖调用是否成功：业务码成功，或明确说明今天已经领过。
+
+    与 status 不同，claim 的 code=0/200 就是「领奖成功」本身，所以这里可以用。
+    """
+    if _business_ok(payload):
         return True
-    if _code_of(payload) in (0, 200):
-        return True
-    return False
+    return _trae_status_checked(payload)
 
 
 def _trae_pick_int(payload: Optional[Dict[str, Any]], *keys: str) -> Optional[int]:
@@ -1064,6 +1115,29 @@ def _trae_pick_int(payload: Optional[Dict[str, Any]], *keys: str) -> Optional[in
                 return int(v)
             if isinstance(v, str) and v.isdigit():
                 return int(v)
+    return None
+
+
+def _trae_today_earned(payload: Optional[Dict[str, Any]]) -> Optional[int]:
+    """今日可得 / 已得的积分 = credits + extra_credits；两个字段都缺则 None。"""
+    base = _trae_pick_int(payload, *TRAE_CREDIT_KEYS)
+    extra = _trae_pick_int(payload, "extra_credits", "extra_credit")
+    if base is None and extra is None:
+        return None
+    return (base or 0) + (extra or 0)
+
+
+def _trae_confirm(headers: Dict[str, str], timeout: int, retries: int) -> Optional[Dict[str, Any]]:
+    """领奖后回查状态：确认到账返回状态报文，否则 None。
+
+    服务端落账可能有几秒延迟，所以按 TRAE_VERIFY_WAITS 的节奏多查几次。
+    """
+    for wait in TRAE_VERIFY_WAITS:
+        if wait:
+            time.sleep(wait)
+        status = http_post(TRAE_STATUS_URL, headers, {}, timeout, retries)
+        if _trae_status_checked(status[1]):
+            return status[1]
     return None
 
 
@@ -1116,30 +1190,35 @@ def run_trae(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int,
     headers = _trae_headers(acc, device_id)
     log(f"[{name}] {_line('查询签到状态', f'device={device_id[:8]}***')}")
     status = http_post(TRAE_STATUS_URL, headers, {}, timeout, retries)
-    if _trae_already(status[1]):
+    if _trae_status_checked(status[1]):
         bal = _trae_query_credits(acc, device_id, timeout, retries)
-        today_credit = _trae_pick_int(status[1], "credits", "today_credit", "daily_credit", "sign_credit", "reward_credit")
-        extra = _trae_pick_int(status[1], "extra_credits", "extra_credit")
-        earned = (today_credit or 0) + (extra or 0)
-        txt = _fmt_credit(today=earned or None, balance=bal)
+        txt = _fmt_credit(today=_trae_today_earned(status[1]), balance=bal)
         log(f"[{name}] {_line('今日已签到，本次无需签到', txt)}")
         return True, _result(PLATFORM_TRAE, name, '今日已签到，本次无需签到', txt), None
     if status_only:
+        if status[1] is None:
+            return False, _result(PLATFORM_TRAE, name, '状态查询失败', clean_text(status[2])[:80]), None
         return True, _result(PLATFORM_TRAE, name, '待签到'), None
+    if status[1] is None:
+        log(f"[{name}] {_line('状态查询失败，仍尝试领取', clean_text(status[2])[:60])}")
 
     log(f"[{name}] {_line('提交签到')}")
     for attempt in range(TRAE_CLAIM_RETRIES):
         claim = http_post(TRAE_CLAIM_URL, headers, {}, timeout, retries)
         c = _code_of(claim[1])
-        if claim[1] is not None and _business_ok(claim[1]) or _trae_already(claim[1]):
-            bal = _trae_query_credits(acc, device_id, timeout, retries)
-            got = _trae_pick_int(claim[1], "credits", "today_credit", "daily_credit", "credit", "reward",
-                                 "score", "points", "obtain_credit", "get_credit", "add_credit", "grant_credit")
-            extra = _trae_pick_int(claim[1], "extra_credits", "extra_credit")
-            earned = (got or 0) + (extra or 0)
-            txt = _fmt_credit(today=earned or None, balance=bal)
-            log(f"[{name}] {_line('签到成功', txt)}")
-            return True, _result(PLATFORM_TRAE, name, '签到成功', txt), acc if acc.get("accessToken") != _orig_token(acc) else None
+        if _trae_claim_ok(claim[1]):
+            # 受理 ≠ 到账：必须回查确认（与 WorkBuddy 同一口径）。少了这一步，
+            # 就会出现「日志写签到成功、平台上其实没签上」的假绿。
+            log(f"[{name}] {_line('签到已受理，回查确认')}")
+            settled = _trae_confirm(headers, timeout, retries)
+            if settled is not None:
+                bal = _trae_query_credits(acc, device_id, timeout, retries)
+                earned = _trae_today_earned(claim[1]) or _trae_today_earned(settled)
+                txt = _fmt_credit(today=earned, balance=bal)
+                log(f"[{name}] {_line('签到成功', txt)}")
+                return True, _result(PLATFORM_TRAE, name, '签到成功', txt), acc if acc.get("accessToken") != _orig_token(acc) else None
+            log(f"[{name}] {_line('回查未确认签到', '状态接口仍显示未签到，稍后重试')}")
+            continue
         if c == 1001:
             log(f"[{name}] {_line('认证失败（1001），刷新 token 重试')}")
             if _trae_refresh(acc):
@@ -1552,13 +1631,13 @@ def _ps(script: str) -> Optional[str]:
 
 
 def _task_snapshot() -> Optional[Dict[str, Dict[str, Any]]]:
-    """查询两个计划任务：是否存在 / 动作 / 下次运行 / 上次运行与结果。
+    """查询三个计划任务：是否存在 / 动作 / 下次运行 / 上次运行与结果。
 
     属性名一律用英文（`name` / `action` / `state` / `next` / `last` / `result`），
     避开 `schtasks /fo LIST /v` 那种「字段名随系统语言变化」的解析坑。
     PowerShell 不可用时返回 None，调用方退化为「只判存在」。
     """
-    names = ",".join("'%s'" % n for n in (TASK_DAILY, TASK_STARTUP))
+    names = ",".join("'%s'" % n for n in (TASK_DAILY, TASK_STARTUP, TASK_RESUME))
     script = (
         "$o=@();"
         "foreach($n in @(__NAMES__)){"
@@ -1616,9 +1695,9 @@ def _task_result_text(result: Any) -> str:
 
 
 def show_tasks() -> int:
-    """检查本脚本的两个计划任务（只读，不做任何修改）。
+    """检查本脚本的三个计划任务（只读，不做任何修改）。
 
-    返回 0 = 两个任务都正常；1 = 缺失 / 指向别处 / 查不到。
+    返回 0 = 三个任务都正常；1 = 缺失 / 指向别处 / 查不到。
     """
     log("===== 计划任务检查 =====")
     if os.name != "nt":
@@ -1630,6 +1709,7 @@ def show_tasks() -> int:
     items = (
         (TASK_DAILY, f"每日 {len(CHECKIN_TIMES)} 次（{'、'.join(CHECKIN_TIMES)}）"),
         (TASK_STARTUP, "用户登录时触发"),
+        (TASK_RESUME, "从睡眠 / 休眠恢复时触发"),
     )
     log(f"入口脚本：{entry}")
     if not ENTRY_PATH.exists():
@@ -1674,7 +1754,7 @@ def show_tasks() -> int:
         log("要强制重装或修复：`checkin.bat --install`；直接跑一次 `checkin.bat` 也会自动补齐。")
         return 0
     log(f"汇总：{total - problems}/{total} 个计划任务正常，需要修复")
-    log("修复：运行 `checkin.bat --install` 重新注册两个任务（普通账户权限即可，无需管理员）。")
+    log("修复：运行 `checkin.bat --install` 重新注册三个任务（普通账户权限即可，无需管理员）。")
     return 1
 
 
@@ -1758,6 +1838,14 @@ def show_today() -> int:
             else:
                 pending += 1
                 log(f"[计划任务] " + _line("缺失", "自动签到不会触发，运行 `checkin.bat --install` 修复"))
+            resume = snapshot.get(TASK_RESUME) or {}
+            if resume.get("found"):
+                log(f"[计划任务] " + _line("唤醒触发已启用",
+                                          f"从睡眠 / 休眠恢复时补签；上次 {resume.get('last') or '从未运行'}"))
+            else:
+                pending += 1
+                log(f"[计划任务] " + _line("唤醒触发缺失",
+                                          "睡眠恢复后不会补签，运行 `checkin.bat --install` 修复"))
 
     log(f"[日志文件] " + _line("最新在前", str(LOG_FILE)))
 
@@ -1805,7 +1893,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--today", "--view", action="store_true", dest="today",
                    help="日常查看：今日签到状态、计划任务下一班次、最近一次运行摘要（纯本地，不联网）")
     p.add_argument("--tasks", action="store_true", dest="tasks",
-                   help="检查本脚本的两个计划任务是否注册、是否指向当前目录（只读）")
+                   help="检查本脚本的三个计划任务是否注册、是否指向当前目录（只读）")
     p.add_argument("--dry-run", action="store_true", help="只加载并校验配置，不发送网络请求")
     p.add_argument("--debug", action="store_true", help="打印脱敏的原始响应，用于排错")
     p.add_argument("--version", action="version", version=VERSION)
