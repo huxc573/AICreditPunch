@@ -6,7 +6,7 @@
 
 ---
 
-## [未发布] - 2026-09-15 09:14
+## [未发布] - 2026-09-15 09:34
 
 版本号待定：本次既有缺陷修复又有新功能，建议按 MINOR 发 `v1.8.0`。
 
@@ -22,11 +22,29 @@
 - **领奖后回查确认**（与 WorkBuddy 同口径）：`提交签到` → `签到已受理，回查确认`
   （按 `TRAE_VERIFY_WAITS = (0, 4)` 回查两次）→ 确认到账才写 `签到成功`；
   回查仍未确认则记 `回查未确认签到` 并进入重试，不再出现「日志绿、平台没签」的假成功。
+- **Trae「本次 +N」虚报**：原按平台声明的 `credits + extra_credits` 相加，实测**多报 50**
+  （声明 `150 + 50 = 200`，余额却只涨 `150`）。改用**签到前后余额差实测**
+  （`_trae_gain()`，领取前先查一次余额）；实测不到时只回退到 `credits`（`_trae_declared_credit()`），
+  **不再与 `extra_credits` 相加** —— 该字段并未形成权益包（`ide_user_ent_usage` 里只有一笔
+  `credits_limit=150` 的「签到奖励」），实际从未到账。
+- **WorkBuddy「当前积分余额」口径错误**：原取签到报文的 `total_credits` 当余额，
+  但它其实是**活动期内累计获得**（= 每日额度 × 活动期内签到天数）。实测每日 100、
+  签到 2 天 → `200`，而账号真实余额是 `2,246.68`，**差一个数量级**。
+  现在改由资源包接口取真实可用积分（见「新增」），`total_credits` 不再当余额显示。
 - **`--status-only` 不再把查询失败说成待签到**：status 请求失败时返回 `状态查询失败`。
-- 积分文案：`本次 +N` 由 `credits + extra_credits` 计算，只在真的已签到 / 签到成功时才输出。
 
 ### 新增
 
+- **WorkBuddy 真实可用积分与构成查询**（与桌面端「设置 - 套餐与积分」同源、同一套 Bearer 凭据）：
+  · `POST /billing/meter/get-user-resource-summary` → 各资源包周期总额 / 剩余；
+  · `POST /billing/meter/get-user-resource-free-packages` → 赠送包明细；
+  · `POST /billing/meter/get-user-resource-paid-packages` → 付费包明细。
+  于是日志多出「真实余额」并附一行构成：
+  `今日已签到，本次无需签到；本次 +100，连续 2 天，当前积分余额 2,242.18` +
+  `积分构成；套餐基础 142.18，平台奖励 2,100，购买积分 0`（与桌面端三行对齐）。
+  总剩余 = 汇总接口各包 `CycleRemainCapacity` 之和；平台奖励 = 赠送包
+  （`SubProductCode` 含 `bonus_pack`）剩余之和；购买积分 = 付费包剩余之和；
+  套餐基础 = 总剩余 − 平台奖励 − 购买。**这三条路由不带 `/v2` 前缀**，与签到那两条不同。
 - **唤醒补签任务 `AICreditPunch-Resume`**：订阅 `Microsoft-Windows-Kernel-Power` **事件 ID 107**
   （睡眠 / 休眠恢复），恢复后 15s 触发完整签到（`Delay=PT15S`）；另把
   `Microsoft-Windows-Power-Troubleshooter` 事件 ID 1 一起 `OR` 进订阅以兼容其它机器
@@ -42,6 +60,12 @@
 - Trae 真机（09:09）：`checked_in=false` → `提交签到` → 回查 `checked_in=true` →
   `签到成功；本次 +200，当前积分余额 184`；修复前 `.checkin_state.json` 里的
   `success_date_trae` 是**假**成功记录，现已名副其实。
+- 积分口径真机（09:32 / 09:33）：Trae 由「本次 +200」改为「本次 +150」
+  （余额 34 → 184，与 `credits=150` 及权益包 `credits_limit=150` 三方吻合）；
+  WorkBuddy 余额由 `200` 改为 `2,242.18`，构成 `套餐基础 142.18 + 平台奖励 2,100 + 购买积分 0`，
+  与桌面端「套餐与积分」页的 `2,249.66 = 149.66 + 2,100 + 0` 逐项对齐（差额为期间正常消耗）。
+- 完整运行 / `--status-only` / `--dry-run` / `--today` / `--tasks` 全部回归通过；
+  余额接口失败只少打一行，不影响签到结果。
 - 计划任务：`checkin.bat --install` 注册三个任务，`--tasks` 汇总 `3/3 正常`；
   `schtasks /run /tn "AICreditPunch-Resume"` 按需触发一次，日志新增一整块完整签到。
 - 真实唤醒验证待做：睡眠 → 唤醒后看 `--tasks` 的「上次运行」是否更新。
@@ -52,8 +76,9 @@
   （`The task XML is malformed. (1,40) 错误: 无法切换编码`），模板已去掉声明并在文件头注明原因。
 - 本机 System 日志只有 `Kernel-Power` 107（无 `Power-Troubleshooter`）；**现代待机（S0ix）**
   的机器可能记其它 ID，换机器按 README §3.3 的命令先确认再改订阅。
-- Trae 签到后 `usage_summary.total_amount` 增加 150（800 → 950），而 status 声明的
-  `credits + extra_credits` 是 200；`本次 +200` 沿用平台口径，未按余额差改写。
+- 积分构成里的「平台奖励 / 购买」靠 `SubProductCode` 标记与付费包接口区分，
+  「套餐基础」由总剩余相减得出；若后端改了包标记，构成行会在口径对不上时**自动省略**，
+  只保留总剩余（宁可少一行也不报错数）。
 
 ## [v1.7.0] - 2026-09-14 23:07
 

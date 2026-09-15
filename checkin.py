@@ -200,21 +200,55 @@ def _mask_url(url: str) -> str:
 # --------------------------------------------------------------------------- #
 # 两平台共用的文案构造
 # --------------------------------------------------------------------------- #
+def _num_of(value: Any) -> Optional[float]:
+    """把报文里的数值字段转成 float：兼容数字与 `"146.6800001"` 这类字符串。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = clean_text(value)
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _fmt_num(value: Any) -> str:
+    """积分数字文案：整数值不带小数（`2,100`），非整数保留两位（`146.68`）。
+
+    与桌面端「套餐与积分」的展示口径一致（千分位 + 最多两位小数）。
+    """
+    num = _num_of(value)
+    if num is None:
+        return str(value)
+    num = round(num, 2)
+    if num == int(num):
+        return f"{int(num):,}"
+    return f"{num:,.2f}"
+
+
 def _fmt_credit(today: Optional[int] = None, streak: Optional[int] = None,
-                balance: Optional[int] = None) -> str:
+                balance: Any = None) -> str:
     """积分明细文本（中文）；字段缺失自动省略，保证两个平台写法一致。
 
-    - `balance` 在 WorkBuddy 是 `total_credits`（当前总积分）；
-    - `balance` 在 Trae 是 `usage_summary.total_amount - consumed_amount`（当前可用积分）。
-    两者日志文本统一为「当前积分余额 X」。
+    - `balance` 必须是**账号真实可用积分**，两平台来源不同：
+      WorkBuddy 走 `/billing/meter/get-user-resource-summary`（见
+      `WorkBuddyClient.balance_text`）；Trae 走 `ide_user_ent_usage` 的
+      `usage_summary.total_amount - consumed_amount`。
+      ⚠️ 别再用 WorkBuddy 签到报文里的 `total_credits` —— 那是活动期内累计获得，
+      与账号可用余额无关（实测差一个数量级）。
+    - `today` 是「本次签到积分」：WorkBuddy 取活动的 `daily_credit`；Trae 取签到前后
+      余额差的实测值（平台声明的 `credits + extra_credits` 会虚报，见 `_trae_gain`）。
     """
     items = []
     if today is not None:
-        items.append(f"本次 +{today}")
+        items.append(f"本次 +{_fmt_num(today)}")
     if streak is not None:
         items.append(f"连续 {streak} 天")
     if balance is not None:
-        items.append(f"当前积分余额 {balance}")
+        items.append(f"当前积分余额 {_fmt_num(balance)}")
     return "，".join(items)
 
 
@@ -383,8 +417,19 @@ WB_ALREADY_WORDS = ("已签到", "已经签到", "already checked", "already cla
 WB_CHECKED_FLAGS = ("today_checked_in", "checked_in", "checkedIn", "claimed")
 WB_TODAY_CREDIT_KEYS = ("daily_credit", "today_credit")
 WB_STREAK_KEY = "streak_days"
-WB_BALANCE_KEY = "total_credits"
 WB_ACCOUNT_LABEL = "WorkBuddy账号"
+
+# 账号真实可用积分（与桌面端「设置 - 套餐与积分」同源）。
+# 注意这三条路由**不带 `/v2`** 前缀，与签到那两条不同；网关前缀差异见客户端注释。
+WB_ROUTE_RESOURCE_SUMMARY = "/billing/meter/get-user-resource-summary"
+WB_ROUTE_FREE_PACKAGES = "/billing/meter/get-user-resource-free-packages"
+WB_ROUTE_PAID_PACKAGES = "/billing/meter/get-user-resource-paid-packages"
+WB_PACKAGE_STATUS = [0, 3]          # 0=有效、3=已用尽（与桌面端请求体一致）
+WB_PACKAGE_PAGE_SIZE = 100
+# 「平台奖励积分」的标识：赠送包（`sp_tcaca_codebuddyide_bonus_pack`）。
+# 免费包列表里既有赠送包也有套餐本体（如 `sp_tcaca_codebuddy_ide` = 个人体验版），
+# 不区分就会把套餐基础积分错算进平台奖励（实测踩过）。
+WB_BONUS_MARK = "bonus_pack"
 
 
 def wb_validated_base(value: Any) -> str:
@@ -458,16 +503,19 @@ class WbReply:
         return False
 
     @property
-    def credits(self) -> Tuple[Optional[int], Optional[int], Optional[int]]:
-        """(本次积分, 连续天数, 当前总积分)；缺失一律 None。"""
+    def credits(self) -> Tuple[Optional[int], Optional[int]]:
+        """(本次积分, 连续天数)；缺失一律 None。
+
+        ⚠️ 报文里的 `total_credits` **不是**账号可用积分，而 = 每日额度 × 活动期内
+        签到天数（实测：每日 100、签到 2 天 → 200，而账号真实余额两千多）。
+        所以这里不把它当余额返回，真实余额另走资源包接口。
+        """
         scope = self._scope()
         today = next((scope[key] for key in WB_TODAY_CREDIT_KEYS if scope.get(key) is not None), None)
         streak = scope.get(WB_STREAK_KEY)
-        balance = scope.get(WB_BALANCE_KEY)
         return (
-            today if isinstance(today, (int, float)) else None,
-            streak if isinstance(streak, (int, float)) and streak else None,
-            balance if isinstance(balance, (int, float)) else None,
+            int(today) if isinstance(today, (int, float)) and not isinstance(today, bool) else None,
+            int(streak) if isinstance(streak, (int, float)) and not isinstance(streak, bool) and streak else None,
         )
 
     @property
@@ -511,9 +559,84 @@ class WorkBuddyClient:
         return headers
 
     def _call(self, route: str) -> WbReply:
-        status, payload, error = http_post(self.base + route, self._headers, {},
-                                           self.timeout, self.retries)
-        return WbReply(status, payload, error)
+        http, payload, error = self._raw(route, {})
+        return WbReply(http, payload, error)
+
+    def _raw(self, route: str, body: Dict[str, Any]) -> Tuple[Optional[int], Any, Optional[str]]:
+        """原样发一次 POST，返回 (HTTP 码, 报文, 传输层错误)。"""
+        return http_post(self.base + route, self._headers, body, self.timeout, self.retries)
+
+    def _packages_remain(self, route: str, codes: List[str], extra: Dict[str, Any],
+                         sub_mark: str = "") -> Optional[float]:
+        """某个资源包接口下各包剩余额度之和；取不到返回 None（不猜 0）。
+
+        `sub_mark` 非空时只累加 `SubProductCode` 含该标记的包 —— 免费包列表里混着
+        套餐本体与赠送包，必须按标记筛（见 `WB_BONUS_MARK`）。
+        接口成功但一个包都没有时返回 0.0，语义是「确实没有这个池子」。
+        """
+        body: Dict[str, Any] = {
+            "PageNumber": 1,
+            "PageSize": WB_PACKAGE_PAGE_SIZE,
+            "PackageCodes": codes,
+            "Status": list(WB_PACKAGE_STATUS),
+        }
+        body.update(extra)
+        _, payload, _ = self._raw(route, body)
+        data = (payload or {}).get("data") if isinstance(payload, dict) else None
+        accounts = data.get("Accounts") if isinstance(data, dict) else None
+        if not isinstance(accounts, list):
+            return None
+        total = 0.0
+        for item in accounts:
+            if not isinstance(item, dict):
+                continue
+            if sub_mark and sub_mark not in (clean_text(item.get("SubProductCode")) or "").lower():
+                continue
+            num = _num_of(item.get("CycleCapacityRemainPrecise"))
+            if num is None:
+                num = _num_of(item.get("CycleCapacityRemain"))
+            if num is not None:
+                total += num
+        return total
+
+    def balance(self) -> Tuple[Optional[str], Optional[str]]:
+        """账号真实可用积分，返回 (余额文本, 构成文本)；查不到一律 (None, None)。
+
+        与桌面端「设置 - 套餐与积分」同口径，共三条同源接口：
+          · get-user-resource-summary       → 各资源包周期总额 / 剩余（总剩余积分）
+          · get-user-resource-free-packages → 赠送包明细（= 平台奖励积分）
+          · get-user-resource-paid-packages → 付费包明细（= 购买积分）
+        总剩余取汇总接口各包 `CycleRemainCapacity` 之和（与桌面端大数字一致）；
+        构成按「赠送包 = 平台奖励、付费包 = 购买、其余 = 套餐基础」拆分：
+        赠送包靠 `SubProductCode` 里的 `bonus_pack` 标记识别（免费包列表里套餐本体
+        与赠送包混在一起，实测区分后才能对上桌面端的「套餐基础 / 平台奖励」两行）。
+        两个明细接口任一失败、或拆出来为负（口径对不上）时只报总额，**不靠猜**。
+        """
+        _, payload, _ = self._raw(WB_ROUTE_RESOURCE_SUMMARY, {})
+        data = (payload or {}).get("data") if isinstance(payload, dict) else None
+        packages = data.get("Packages") if isinstance(data, dict) else None
+        if not isinstance(packages, list) or not packages:
+            return None, None
+        remains = [_num_of(p.get("CycleRemainCapacity")) for p in packages if isinstance(p, dict)]
+        remains = [r for r in remains if r is not None]
+        if not remains:
+            return None, None
+        total = sum(remains)
+        codes = [clean_text(p.get("PackageCode")) for p in packages if isinstance(p, dict)]
+        codes = [c for c in codes if c]
+        text = _fmt_num(total)
+        if not codes:
+            return text, None
+
+        reward = self._packages_remain(WB_ROUTE_FREE_PACKAGES, codes, {}, WB_BONUS_MARK)
+        paid = self._packages_remain(WB_ROUTE_PAID_PACKAGES, codes, {"NeedRenewInfo": True})
+        if reward is None or paid is None:
+            return text, None
+        base = total - reward - paid
+        if base < 0:                      # 口径对不上就不报构成，避免误导
+            return text, None
+        return text, (f"套餐基础 {_fmt_num(base)}，平台奖励 {_fmt_num(reward)}，"
+                      f"购买积分 {_fmt_num(paid)}")
 
     def _say(self, state: str, detail: str = "") -> None:
         log(f"[{self.name}] {_line(state, detail)}")
@@ -559,9 +682,16 @@ class WorkBuddyClient:
         return self._outcome(False, self.name, "领取后回查未确认签到")
 
     def _settle(self, state: str, reply: WbReply) -> Tuple[bool, str]:
-        """已签到 / 签到成功：日志与结果文案都带上积分明细。"""
-        self._say(state, reply.credit_text)
-        return self._outcome(True, self.name, state, reply.credit_text)
+        """已签到 / 签到成功：日志与结果文案带上积分明细与账号真实余额。"""
+        balance, compose = self.balance()
+        parts = [reply.credit_text]
+        if balance:
+            parts.append(f"当前积分余额 {balance}")
+        detail = "，".join(p for p in parts if p)
+        self._say(state, detail)
+        if compose:
+            self._say("积分构成", compose)
+        return self._outcome(True, self.name, state, detail)
 
 
 def run_workbuddy(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int) -> Tuple[bool, str]:
@@ -1118,13 +1248,23 @@ def _trae_pick_int(payload: Optional[Dict[str, Any]], *keys: str) -> Optional[in
     return None
 
 
-def _trae_today_earned(payload: Optional[Dict[str, Any]]) -> Optional[int]:
-    """今日可得 / 已得的积分 = credits + extra_credits；两个字段都缺则 None。"""
-    base = _trae_pick_int(payload, *TRAE_CREDIT_KEYS)
-    extra = _trae_pick_int(payload, "extra_credits", "extra_credit")
-    if base is None and extra is None:
+def _trae_declared_credit(payload: Optional[Dict[str, Any]]) -> Optional[int]:
+    """平台声明的「本次签到积分」= `credits`；没有该字段则 None。
+
+    ⚠️ **不要**把 `extra_credits` 加进来。实测（2026-09-15）：status 声明
+    `credits=150 / extra_credits=50`，但签到后余额只涨 150，权益包清单里也只多出
+    一笔 `credits_limit=150` 的「签到奖励」，`extra_credits` 根本没形成权益包、
+    实际未到账。把两者相加会虚报（旧日志显示「本次 +200 / 余额 34→184」即此因）。
+    """
+    return _trae_pick_int(payload, *TRAE_CREDIT_KEYS)
+
+
+def _trae_gain(before: Optional[int], after: Optional[int]) -> Optional[int]:
+    """本次实际到账 = 签到前后余额差；任一为空或差额非正时返回 None（交回退）。"""
+    if before is None or after is None:
         return None
-    return (base or 0) + (extra or 0)
+    gain = after - before
+    return gain if gain > 0 else None
 
 
 def _trae_confirm(headers: Dict[str, str], timeout: int, retries: int) -> Optional[Dict[str, Any]]:
@@ -1192,7 +1332,7 @@ def run_trae(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int,
     status = http_post(TRAE_STATUS_URL, headers, {}, timeout, retries)
     if _trae_status_checked(status[1]):
         bal = _trae_query_credits(acc, device_id, timeout, retries)
-        txt = _fmt_credit(today=_trae_today_earned(status[1]), balance=bal)
+        txt = _fmt_credit(today=_trae_declared_credit(status[1]), balance=bal)
         log(f"[{name}] {_line('今日已签到，本次无需签到', txt)}")
         return True, _result(PLATFORM_TRAE, name, '今日已签到，本次无需签到', txt), None
     if status_only:
@@ -1201,6 +1341,9 @@ def run_trae(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int,
         return True, _result(PLATFORM_TRAE, name, '待签到'), None
     if status[1] is None:
         log(f"[{name}] {_line('状态查询失败，仍尝试领取', clean_text(status[2])[:60])}")
+
+    # 记下领取前的余额：本次实际到账只能靠前后差实测（平台声明的值会虚报）。
+    balance_before = _trae_query_credits(acc, device_id, timeout, retries)
 
     log(f"[{name}] {_line('提交签到')}")
     for attempt in range(TRAE_CLAIM_RETRIES):
@@ -1212,9 +1355,11 @@ def run_trae(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int,
             log(f"[{name}] {_line('签到已受理，回查确认')}")
             settled = _trae_confirm(headers, timeout, retries)
             if settled is not None:
-                bal = _trae_query_credits(acc, device_id, timeout, retries)
-                earned = _trae_today_earned(claim[1]) or _trae_today_earned(settled)
-                txt = _fmt_credit(today=earned, balance=bal)
+                balance_after = _trae_query_credits(acc, device_id, timeout, retries)
+                earned = _trae_gain(balance_before, balance_after)
+                if earned is None:
+                    earned = _trae_declared_credit(claim[1]) or _trae_declared_credit(settled)
+                txt = _fmt_credit(today=earned, balance=balance_after)
                 log(f"[{name}] {_line('签到成功', txt)}")
                 return True, _result(PLATFORM_TRAE, name, '签到成功', txt), acc if acc.get("accessToken") != _orig_token(acc) else None
             log(f"[{name}] {_line('回查未确认签到', '状态接口仍显示未签到，稍后重试')}")
