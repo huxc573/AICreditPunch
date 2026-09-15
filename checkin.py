@@ -55,7 +55,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 DEFAULT_TIMEOUT = 20
 DEFAULT_RETRIES = 2
 DEBUG = False

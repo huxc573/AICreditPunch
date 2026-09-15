@@ -1,6 +1,6 @@
 # AICreditPunch · 本地自动签到
 
-> **当前版本：v1.7**（`VERSION` = `1.7.0`　·　2026-09-14 23:07）
+> **当前版本：v1.8**（`VERSION` = `1.8.0`　·　2026-09-15 09:55）
 > 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 WorkBuddy + Trae 一体化自动签到、状态与积分查询工具（支持多账号）。
@@ -189,7 +189,7 @@ python checkin.py --init               # 两个平台依次初始化
 输出结构（两平台完全一致，v1.4.0 起首尾加起止标记）：
 
 ```text
-一体化每日签到脚本 v1.7.0 启动
+一体化每日签到脚本 v1.8.0 启动
 ===== WorkBuddy =====
 [示例账号] 查询签到状态；API=https://www.codebuddy.cn
 [示例账号] 今日已签到，本次无需签到；本次 +100，连续 1 天，当前积分余额 2,242.18
@@ -235,7 +235,7 @@ WorkBuddy 今日已推送成功通知，本次静默跳过
 脚本会检测到缺少账号并打印初始化指引，退出码 `1`，且**不发送任何网络请求**：
 
 ```text
-一体化每日签到脚本 v1.7.0 启动
+一体化每日签到脚本 v1.8.0 启动
 配置错误：未找到配置文件：...\config.json；请先运行 ... 完成初始化
 尚未初始化，请先执行下面至少一条初始化命令：
   python checkin.py --init-workbuddy     # WorkBuddy：导入本机桌面端登录凭据（自动发现）
@@ -262,7 +262,7 @@ python checkin.py --tasks     # 等价：checkin.bat --tasks
 一眼看完今天的状态，不用翻日志：
 
 ```text
-一体化每日签到脚本 v1.7.0 启动（日常查看）
+一体化每日签到脚本 v1.8.0 启动（日常查看）
 ===== 日常查看 =====
 日期：2026-09-14（周一）
 [WorkBuddy] 今日已签到；1 个账号；成功记录 2026-09-14
@@ -273,7 +273,7 @@ python checkin.py --tasks     # 等价：checkin.bat --tasks
 [日志文件] 最新在前；C:\Users\<你>\AppData\Roaming\AICreditPunch.log
 
 最近一次运行（日志顶部）：
-  [2026-09-14 20:45:03] 一体化每日签到脚本 v1.7.0 启动
+  [2026-09-14 20:45:03] 一体化每日签到脚本 v1.8.0 启动
   [2026-09-14 20:45:03] ===== WorkBuddy =====
   [2026-09-14 20:45:04] [示例账号] 今日已签到，本次无需签到；本次 +100，连续 1 天，当前积分余额 2,242.18
   ...
@@ -298,7 +298,7 @@ python checkin.py --tasks     # 等价：checkin.bat --tasks
 核对三个任务是否注册、是否指向**当前目录**的 `checkin.bat`：
 
 ```text
-一体化每日签到脚本 v1.7.0 启动（计划任务检查）
+一体化每日签到脚本 v1.8.0 启动（计划任务检查）
 ===== 计划任务检查 =====
 入口脚本：D:\Dev\Workspaces\WorkBuddy\AICreditPunch\checkin.bat
 
@@ -776,8 +776,8 @@ git log --oneline archive/full-history | head    # 本地完整历史（40 个�
 | `MINOR` | 向后兼容的新功能 | 新增企业微信应用推送、新增 `--init-*` 命令 |
 | `PATCH` | 向后兼容的修复 | 修 bat 编码乱码、改超时、安全加固 |
 
-- **版本号的唯一来源是根目录 `VERSION`**（单行，如 `1.7.0`），脚本与文档都以它为准。
-- Git 标签命名 `v<MAJOR>.<MINOR>.<PATCH>`，对外简称可写 **v1.7**。
+- **版本号的唯一来源是根目录 `VERSION`**（单行，如 `1.8.0`），脚本与文档都以它为准。
+- Git 标签命名 `v<MAJOR>.<MINOR>.<PATCH>`，对外简称可写 **v1.8**。
 - **迭代时间约定**：`CHANGELOG.md` 每个版本段标题除日期外必须带 **24 小时制、到分钟**的时间
   （格式 `YYYY-MM-DD HH:MM`），`README.md` 顶部版本号同样带该时间，便于精确回溯。
 
@@ -801,8 +801,8 @@ git add -A
 git commit -m "fix(bat): 修复开机时网络未就绪导致漏签"
 # 4. 需要发版时：更新 VERSION → CHANGELOG 顶部追加 → 提交 → 打标签
 git add VERSION CHANGELOG.md
-git commit -m "chore(release): v1.7.0"
-git tag -a v1.7.0 -m "v1.7.0: 一句话概要"
+git commit -m "chore(release): v1.8.0"
+git tag -a v1.8.0 -m "1.8.0: 一句话概要"
 ```
 
 > ✅ 本仓库已以 **MIT** 公开发布：[`huxc573/AICreditPunch`](https://github.com/huxc573/AICreditPunch)，
@@ -843,9 +843,9 @@ git tag -a v1.7.0 -m "v1.7.0: 一句话概要"
 
 ```bash
 git log --oneline --decorate      # 找到目标 tag
-git show v1.7.0                   # 查看该版本内容
-git checkout v1.7.0 -- <文件>      # 只回滚单个文件
-git checkout -b hotfix/x v1.7.0   # 从旧版本拉修复分支
+git show v1.8.0                   # 查看该版本内容
+git checkout v1.8.0 -- <文件>      # 只回滚单个文件
+git checkout -b hotfix/x v1.8.0   # 从旧版本拉修复分支
 ```
 
 回滚后记得同步修正 `VERSION` 与 `CHANGELOG.md`，避免版本号与实际代码不符。
