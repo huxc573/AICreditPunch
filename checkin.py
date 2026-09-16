@@ -79,6 +79,7 @@ TASK_STARTUP = "AICreditPunch-Startup"
 TASK_RESUME = "AICreditPunch-Resume"
 CHECKIN_TIMES = ["08:45", "11:45", "14:45", "17:45", "20:45", "23:45"]
 ENTRY_BAT = "checkin.bat"
+ENTRY_VBS = "run-hidden.vbs"  # 计划任务动作的隐藏窗口包装器（wscript.exe 执行）
 ENTRY_PATH = HERE / ENTRY_BAT
 
 
@@ -1857,8 +1858,11 @@ def show_tasks() -> int:
         (TASK_RESUME, "从睡眠 / 休眠恢复时触发"),
     )
     log(f"入口脚本：{entry}")
+    log(f"计划任务动作：wscript.exe -> {ENTRY_VBS} -> {ENTRY_BAT}，全程隐藏窗口，不弹 cmd 黑框")
     if not ENTRY_PATH.exists():
         log(_line("异常", f"当前目录下找不到 {ENTRY_BAT}，请确认脚本是否被移动或删除"))
+    elif not (ENTRY_PATH.parent / ENTRY_VBS).exists():
+        log(_line("异常", f"当前目录下找不到 {ENTRY_VBS}，计划任务将无法启动，请恢复该文件后重跑 `checkin.bat --install`"))
     log("")
 
     snapshot = _task_snapshot()

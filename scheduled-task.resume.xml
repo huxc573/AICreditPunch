@@ -1,9 +1,10 @@
 <!--
   AICreditPunch - wake-up trigger task template.
 
-  Registered by checkin.bat as AICreditPunch-Resume. checkin.bat replaces the two
+  Registered by checkin.bat as AICreditPunch-Resume. checkin.bat replaces the
   placeholders before handing this file to Register-ScheduledTask -Xml:
 
+    __CHECKIN_VBS__   absolute path of run-hidden.vbs in the project folder
     __CHECKIN_BAT__   absolute path of checkin.bat in the project folder
     __USER__          the current user name (interactive token, no password stored)
 
@@ -20,6 +21,13 @@
   is harmless. Systems using modern standby (S0ix) may log a different id; check
   "Get-WinEvent -FilterHashtable @{LogName='System'; Id=107,507}" on such a host
   before relying on this task there.
+
+  Why the wscript wrapper: the task runs with an interactive token, so a plain
+  "cmd.exe /c checkin.bat" action pops an empty console window on screen at
+  every trigger. wscript.exe is a GUI-subsystem host (no console of its own)
+  and run-hidden.vbs starts cmd with window style 0, so the whole chain is
+  invisible. The vbs waits for the bat and passes its exit code through, which
+  keeps "last run time / last result" accurate.
 
   Do NOT add an <?xml?> declaration back: Register-ScheduledTask -Xml takes a
   string, and a string starting with a declaration is rejected with
@@ -66,8 +74,8 @@
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>cmd.exe</Command>
-      <Arguments>/c "__CHECKIN_BAT__"</Arguments>
+      <Command>wscript.exe</Command>
+      <Arguments>"__CHECKIN_VBS__" "__CHECKIN_BAT__"</Arguments>
     </Exec>
   </Actions>
 </Task>

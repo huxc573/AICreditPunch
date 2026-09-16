@@ -255,10 +255,13 @@ call :say Scheduled tasks missing or out of date - registering ...
 rem Register through PowerShell: it works without elevation and allows the
 rem "start when available" setting, so a run missed while the PC was off is
 rem caught up later. [char]34 is a double quote, which keeps this command
-rem free of nested quotes.
+rem free of nested quotes. The task action goes through run-hidden.vbs
+rem (wscript.exe) so the runs happen in a hidden window - wscript is a
+rem GUI-subsystem host and the vbs starts cmd with window style 0.
 set "PS_SCRIPT_DIR=%SCRIPT_DIR%"
-set "PSREG=$d=$env:PS_SCRIPT_DIR;$x=[char]34;$arg='/c '+$x+$d+'\checkin.bat'+$x;"
-set "PSREG=%PSREG%$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument $arg;"
+set "PSREG=$d=$env:PS_SCRIPT_DIR;$x=[char]34;"
+set "PSREG=%PSREG%$arg=$x+$d+'\run-hidden.vbs'+$x+' '+$x+$d+'\checkin.bat'+$x;"
+set "PSREG=%PSREG%$a=New-ScheduledTaskAction -Execute 'wscript.exe' -Argument $arg;"
 set "PSREG=%PSREG%$s=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10);"
 set "PSREG=%PSREG%$p=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited;"
 set "PSREG=%PSREG%$t=@();foreach($h in '08:45','11:45','14:45','17:45','20:45','23:45'){$t+=New-ScheduledTaskTrigger -Daily -At $h};"
@@ -269,7 +272,7 @@ rem express, so it comes from an XML template. [IO.File]::ReadAllText reads it
 rem without BOM surprises; $d is the project folder reused from above.
 set "PS_RESUME_XML=%SCRIPT_DIR%\scheduled-task.resume.xml"
 set "PSREG=%PSREG%$rx=[IO.File]::ReadAllText($env:PS_RESUME_XML);"
-set "PSREG=%PSREG%$rx=$rx.Replace('__CHECKIN_BAT__',$d+'\checkin.bat').Replace('__USER__',$env:USERNAME);"
+set "PSREG=%PSREG%$rx=$rx.Replace('__CHECKIN_VBS__',$d+'\run-hidden.vbs').Replace('__CHECKIN_BAT__',$d+'\checkin.bat').Replace('__USER__',$env:USERNAME);"
 set "PSREG=%PSREG%Register-ScheduledTask -TaskName '%TASK_RESUME%' -Xml $rx -Force -ErrorAction Stop|Out-Null"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "%PSREG%" >nul 2>&1
 call :now

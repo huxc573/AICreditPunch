@@ -42,6 +42,7 @@ AICreditPunch/
 │
 ├── checkin.py             唯一脚本：签到 + 初始化 + 通知（WorkBuddy + Trae，单文件零依赖）
 ├── checkin.bat            Windows 计划任务入口（ASCII + CRLF，网络等待 + 任务自管理）
+├── run-hidden.vbs         计划任务的隐藏窗口包装器（wscript.exe 执行，触发时不弹 cmd 黑框）
 ├── scheduled-task.resume.xml  唤醒触发任务的 XML 模板（事件触发器，由 checkin.bat 注册）
 ├── config.json.example    脱敏配置模板（可入库）
 ├── .gitignore             凭据与运行产物防护
@@ -56,6 +57,7 @@ AICreditPunch/
 |---|---|---|
 | `checkin.py` | 唯一脚本：签到 + 初始化（`--init-*`）+ 内置通知 | 否 |
 | `checkin.bat` | 计划任务入口；子命令 `--install` / `--uninstall` / `--tasks` / `--today` / `--help`，其它 `--xxx` 转发给 `checkin.py` | 否 |
+| `run-hidden.vbs` | 计划任务动作的包装器：`wscript.exe` 以隐藏窗口启动 cmd，触发时不弹黑框 | 否 |
 | `scheduled-task.resume.xml` | `AICreditPunch-Resume` 的 XML 模板：`Kernel-Power` 事件 ID 107（睡眠/休眠恢复）触发器 | 否 |
 | `config.json.example` | 脱敏模板 | 否 |
 | `LICENSE` | MIT 许可全文 | 否 |
@@ -422,7 +424,13 @@ Run this file without arguments to install the tasks again.
 | `AICreditPunch-Startup` | 用户登录时 | 登录补跑，防止当天错过 |
 | `AICreditPunch-Resume` | **从睡眠 / 休眠恢复时**（`Kernel-Power` 事件 ID 107） | 唤醒补签；事件触发器只能走 XML（见 §3.1） |
 
-动作均为 `cmd.exe /c "<项目目录>\checkin.bat"`，以**当前用户 + 交互式令牌**运行（无需存密码）。
+动作均为 `wscript.exe "<项目目录>\run-hidden.vbs" "<项目目录>\checkin.bat"`，以**当前用户 + 交互式令牌**运行（无需存密码）。
+
+> **为什么有一层 vbs**：交互式令牌下，直接用 `cmd.exe /c` 做任务动作，每次触发都会在屏幕上弹一个
+> 空的 cmd 黑框。`wscript.exe` 是 GUI 子系统宿主（自身没有控制台），`run-hidden.vbs` 再以**窗口样式 0**
+> （隐藏）启动 cmd，整条链路不再出现任何窗口。vbs 会**等待 bat 结束并透传退出码**，
+> 所以「上次运行时间 / 上次结果」依然准确，10 分钟执行时限照常生效；
+> 手动双击或控制台运行 `checkin.bat` 不经 vbs，输出照常可见。
 
 常用管理命令：
 
@@ -437,7 +445,7 @@ schtasks /change /tn "AICreditPunch-Daily" /disable      :: 临时停用
 
 ```cmd
 schtasks /create /tn "AICreditPunch-Daily" ^
-  /tr "cmd.exe /c \"<项目目录>\checkin.bat\"" /sc daily /st 08:45 /f
+  /tr "wscript.exe \"<项目目录>\run-hidden.vbs\" \"<项目目录>\checkin.bat\"" /sc daily /st 08:45 /f
 ```
 
 > **关于「开机时自动执行」的取舍**：用的是 `-AtLogOn`（用户登录时触发），而不是真正的 `-AtStartup`。
@@ -710,6 +718,7 @@ notepad "%APPDATA%\AICreditPunch.log"
 | `[AICreditPunch-Daily] 缺失`（`--tasks`） | 计划任务不存在 | 跑 `checkin.bat --install` 重装 |
 | `[AICreditPunch-Daily] 异常；动作指向 …`（`--tasks`） | 任务在，但动作指向的不是**当前目录**的 `checkin.bat`（目录改名/搬移后常见） | 跑一次 `checkin.bat` 会自动重注册；也可 `checkin.bat --install` |
 | `[AICreditPunch-Resume] 缺失`（`--tasks`） | 唤醒触发任务不在（旧版本装的，或 `scheduled-task.resume.xml` 被删） | 跑 `checkin.bat --install`，它会读 XML 模板重新注册 |
+| 计划任务触发时弹空的 cmd 黑框 | 旧版本动作直接是 `cmd.exe /c checkin.bat`（v1.8.0 及更早） | 跑一次 `checkin.bat --install`，动作会改为经 `run-hidden.vbs` 隐藏运行 |
 | `The task XML is malformed. (1,40) 错误: 无法切换编码` | `scheduled-task.resume.xml` 里出现了 `<?xml?>` 声明 —— `Register-ScheduledTask -Xml` 收字符串时不允许 | 删掉模板首行声明，重新 `checkin.bat --install` |
 | 睡眠 / 休眠唤醒后没有补签 | 事件触发器没匹配上；用现代待机（S0ix）的机器常记别的 ID | 按 §3.3 的命令看本机实际记哪个 ID，改 `scheduled-task.resume.xml` 的订阅后 `--install` |
 | Trae 每次都提示 `今日已签到，本次无需签到`，平台上其实没签 | 判定 bug：status 返回的 `code=0 / message=success` 被误当成「已签到」（v1.7.0 及更早） | 升级本脚本；修好后日志会先出现 `提交签到` → `签到已受理，回查确认` → `签到成功` |

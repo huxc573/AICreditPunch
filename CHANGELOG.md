@@ -6,6 +6,26 @@
 
 ---
 
+## [未发布] - 2026-09-16 08:15
+
+### 新增
+
+- **计划任务隐藏窗口运行（去掉触发时的空 cmd 黑框）**：三个任务的动作由
+  `cmd.exe /c "...\checkin.bat"` 改为 `wscript.exe "...\run-hidden.vbs" "...\checkin.bat"`。
+  交互式令牌下旧动作每次触发都会在屏幕上弹一个空 cmd 窗口（用户反馈）；`wscript.exe` 是
+  GUI 子系统宿主（自身无控制台），vbs 以窗口样式 0 启动 cmd，整条链路不再出现任何窗口。
+  vbs **等待 bat 结束并透传退出码**（`WScript.Quit rc`），「上次运行时间 / 上次结果」与
+  10 分钟执行时限不受影响；`--install` 重新注册即生效，手动运行 `checkin.bat` 仍照常显示输出。
+- 新增 `run-hidden.vbs`（纯 ASCII + CRLF，与 `checkin.bat` 同约束，勿改编码）。
+
+### 验证
+
+- `--install` 后 `--tasks` 汇总 `3/3 正常`，动作校验仍通过（参数里含 `checkin.bat` 全路径）；
+  任务侧「要运行的任务」显示 `wscript.exe "...\run-hidden.vbs" "...\checkin.bat"`。
+- `schtasks /run /tn AICreditPunch-Resume` 触发 → 日志新增完整签到块（08:12:30，
+  两平台「今日已签到，无需签到」，当日已签故静默跳过通知），链路 `wscript → vbs → cmd → bat` 全通。
+- `py_compile` + AST 未定义名扫描干净；`checkin.bat` / `run-hidden.vbs` 纯 ASCII + CRLF。
+
 ## [v1.8.0] - 2026-09-15 09:55
 
 按 `MINOR` 发版：本次含一处**严重缺陷修复**（Trae 判定误判，签到请求实际从未发出）、
