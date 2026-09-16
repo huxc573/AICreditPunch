@@ -424,13 +424,17 @@ Run this file without arguments to install the tasks again.
 | `AICreditPunch-Startup` | 用户登录时 | 登录补跑，防止当天错过 |
 | `AICreditPunch-Resume` | **从睡眠 / 休眠恢复时**（`Kernel-Power` 事件 ID 107） | 唤醒补签；事件触发器只能走 XML（见 §3.1） |
 
-动作均为 `wscript.exe "<项目目录>\run-hidden.vbs" "<项目目录>\checkin.bat"`，以**当前用户 + 交互式令牌**运行（无需存密码）。
+动作均为 `wscript.exe "<项目目录>\run-hidden.vbs" "<项目目录>\checkin.bat --auto"`，以**当前用户 + 交互式令牌**运行（无需存密码）。
 
 > **为什么有一层 vbs**：交互式令牌下，直接用 `cmd.exe /c` 做任务动作，每次触发都会在屏幕上弹一个
 > 空的 cmd 黑框。`wscript.exe` 是 GUI 子系统宿主（自身没有控制台），`run-hidden.vbs` 再以**窗口样式 0**
 > （隐藏）启动 cmd，整条链路不再出现任何窗口。vbs 会**等待 bat 结束并透传退出码**，
-> 所以「上次运行时间 / 上次结果」依然准确，10 分钟执行时限照常生效；
-> 手动双击或控制台运行 `checkin.bat` 不经 vbs，输出照常可见。
+> 所以「上次运行时间 / 上次结果」依然准确，10 分钟执行时限照常生效。
+>
+> **手动与自动的差别**：任务固定带 `--auto`（vbs 保证只带一个），该开关下**不打印、不暂停**，
+> 全程无窗口。手动运行不带它，会把本次结果**直接打印在窗口里**（日志是 UTF-8，会临时切到
+> 65001 代码页再切回），**双击**时结束后停留等待按键；从已打开的终端里运行则不暂停。
+> 想让一次手动运行也不出声，就显式加 `--auto`：`checkin.bat --auto`。
 
 常用管理命令：
 
@@ -445,7 +449,7 @@ schtasks /change /tn "AICreditPunch-Daily" /disable      :: 临时停用
 
 ```cmd
 schtasks /create /tn "AICreditPunch-Daily" ^
-  /tr "wscript.exe \"<项目目录>\run-hidden.vbs\" \"<项目目录>\checkin.bat\"" /sc daily /st 08:45 /f
+  /tr "wscript.exe \"<项目目录>\run-hidden.vbs\" \"<项目目录>\checkin.bat --auto\"" /sc daily /st 08:45 /f
 ```
 
 > **关于「开机时自动执行」的取舍**：用的是 `-AtLogOn`（用户登录时触发），而不是真正的 `-AtStartup`。

@@ -15,16 +15,39 @@
   交互式令牌下旧动作每次触发都会在屏幕上弹一个空 cmd 窗口（用户反馈）；`wscript.exe` 是
   GUI 子系统宿主（自身无控制台），vbs 以窗口样式 0 启动 cmd，整条链路不再出现任何窗口。
   vbs **等待 bat 结束并透传退出码**（`WScript.Quit rc`），「上次运行时间 / 上次结果」与
-  10 分钟执行时限不受影响；`--install` 重新注册即生效，手动运行 `checkin.bat` 仍照常显示输出。
+  10 分钟执行时限不受影响；`--install` 重新注册即生效。
 - 新增 `run-hidden.vbs`（纯 ASCII + CRLF，与 `checkin.bat` 同约束，勿改编码）。
+
+### 修复
+
+- **手动运行 `checkin.bat` 窗口什么也不显示**：运行结果一直只写进临时日志再前置到
+  日志文件，控制台从不打印，双击时窗口还直接关掉。现在手动运行会先把本次块打印到
+  窗口（日志是 UTF-8，临时切到 65001 代码页再切回原代码页），并在**双击**时暂停；
+  计划任务靠新增的内部开关 `--auto` 区分，该开关下完全静默。
+- **注册失败被误报成功**：`--install` 原先用「任务是否存在且指向本目录」判定成败，
+  重新注册失败时旧定义仍在、于是照样报成功。现在先看注册命令自身的退出码。
+- **Resume 任务注册失败（XML 注释被注入）**：模板注释里列了占位符名，替换时把
+  `checkin.bat --auto` 注入注释，而 `--` 在 XML 注释里非法，报「任务 XML 格式错误
+  (8,60) 不正确的备注语法」→ 旧定义被保留、又被上一条误报成成功。注释中的占位符
+  改为不带 `__` 的写法，注释里残留的非 ASCII 报错文案一并改回 ASCII。
+- **任务被 pause 卡死**：任务参数已带 `--auto`，vbs 又追加一次 → 第二个 `--auto` 落到
+  「转发给 python」分支，而该分支的 `pause` 让任务无限等待按键（08:45 的 Daily 即因此
+  挂起，日志没写、结果停在 0x41301）。vbs 改为幂等（缺失才补），`pause` 的判定改为
+  只认资源管理器双击（命令行去引号后以空格结尾），管道与计划任务下不再暂停。
 
 ### 验证
 
 - `--install` 后 `--tasks` 汇总 `3/3 正常`，动作校验仍通过（参数里含 `checkin.bat` 全路径）；
-  任务侧「要运行的任务」显示 `wscript.exe "...\run-hidden.vbs" "...\checkin.bat"`。
+  任务侧「要运行的任务」显示 `wscript.exe "...\run-hidden.vbs" "...\checkin.bat --auto"`。
 - `schtasks /run /tn AICreditPunch-Resume` 触发 → 日志新增完整签到块（08:12:30，
   两平台「今日已签到，无需签到」，当日已签故静默跳过通知），链路 `wscript → vbs → cmd → bat` 全通。
 - `py_compile` + AST 未定义名扫描干净；`checkin.bat` / `run-hidden.vbs` 纯 ASCII + CRLF。
+- 手动 vs 自动对比：`checkin.bat` 打印本次块（rc=0，`Checking the network ...` 起），
+  `checkin.bat --auto` 零输出（rc=0）；`--help` / `--today` / `--tasks` 均不卡住，
+  即使 stdin 是管道也不再暂停。
+- `--install` 后三个任务的 Arguments 均为 `"...\run-hidden.vbs" "...\checkin.bat --auto"`
+  （vbs 幂等，不会再出现两个 `--auto`）；`schtasks /run` 触发 Resume → 日志 08:52:35
+  新增完整签到块，上次结果 `0x0`，无残留进程。
 
 ## [v1.8.0] - 2026-09-15 09:55
 

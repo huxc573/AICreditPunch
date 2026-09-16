@@ -10,6 +10,10 @@ rem    checkin.bat --uninstall   remove all three scheduled tasks
 rem    checkin.bat --logs        open the local log in notepad
 rem    checkin.bat --help        show usage
 rem
+rem  --auto is internal: the scheduled tasks pass it so a triggered run stays
+rem  silent - no console output and no pause. A manual run prints this run's
+rem  block on the console and pauses when it was started by a double-click.
+rem
 rem  Three scheduled tasks are managed here (see README section 3.3):
 rem    AICreditPunch-Daily     six daily triggers, StartWhenAvailable
 rem    AICreditPunch-Startup   at user logon
@@ -70,6 +74,16 @@ rem Every subcommand is --prefixed, except the help ones: --help, -h, /? and
 rem the bare word help all print the usage. The bare words install, uninstall
 rem and logs are NOT valid any more.
 set "ARG1=%~1"
+set "AUTO="
+
+rem Internal switch for the scheduled tasks: keep the triggered run silent.
+rem This is a goto, not an if-block: inside a block %1 is expanded before
+rem shift takes effect, so ARG1 would still read --auto and get forwarded.
+if /i not "%ARG1%"=="--auto" goto after_auto
+set "AUTO=1"
+shift
+set "ARG1=%~1"
+:after_auto
 
 if /i "%ARG1%"=="--uninstall" goto uninstall
 if /i "%ARG1%"=="--install"   goto tasks_force
@@ -113,6 +127,7 @@ rem At boot/login WiFi is often not ready yet; the script itself only retries
 rem about 6s, so probe TCP 443 here and give up after ~120s instead of
 rem wasting this run.
 set "N=0"
+if not defined AUTO echo Checking the network ...
 :waitnet
 powershell -NoProfile -Command "try { $c = New-Object System.Net.Sockets.TcpClient; $c.Connect('www.workbuddy.cn', 443); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 if %ERRORLEVEL%==0 goto netok
@@ -130,6 +145,7 @@ if not exist "%PYEXE%" (
     call :say ERROR: python not found: %PYEXE%
     rem Blank line so this block stays separated from the previous run in the log.
     echo.>>"%TMPLOG%"
+    if not defined AUTO call :show_block
     call :publish_block
     if defined REG_FAILED call :open_log
     exit /b 127
@@ -137,6 +153,7 @@ if not exist "%PYEXE%" (
 
 "%PYEXE%" checkin.py>>"%TMPLOG%" 2>&1
 set "RC=%ERRORLEVEL%"
+if not defined AUTO call :show_block
 call :publish_block
 rem Open the log when task registration failed, and also when checkin.py
 rem asked for it. Both happen AFTER the prepend above, so notepad shows
@@ -146,6 +163,7 @@ if exist "%OPEN_LOG_FLAG%" (
     del "%OPEN_LOG_FLAG%" >nul 2>&1
     call :open_log
 )
+if not defined AUTO call :pause_if_double_clicked
 exit /b %RC%
 
 rem ================================================================ subroutines
@@ -212,6 +230,19 @@ if exist "%LOGFILE%" (
 del "%TMPLOG%" >nul 2>&1
 exit /b 0
 
+:show_block
+rem Print this run's block on the console. The log is UTF-8, so switch the
+rem console to UTF-8 first and restore the original code page afterwards.
+if not exist "%TMPLOG%" exit /b 0
+set "OLDCP="
+for /f "delims=" %%i in ('powershell -NoProfile -Command "(Get-Culture).TextInfo.OEMCodePage"') do set "OLDCP=%%i"
+chcp 65001 >nul 2>&1
+echo.
+type "%TMPLOG%"
+if defined OLDCP chcp %OLDCP% >nul 2>&1
+set "OLDCP="
+exit /b 0
+
 :say
 rem Write one ASCII-only line into this run's temp log.
 rem The timestamp prefix is dropped when :now could not produce an ASCII
@@ -260,7 +291,7 @@ rem (wscript.exe) so the runs happen in a hidden window - wscript is a
 rem GUI-subsystem host and the vbs starts cmd with window style 0.
 set "PS_SCRIPT_DIR=%SCRIPT_DIR%"
 set "PSREG=$d=$env:PS_SCRIPT_DIR;$x=[char]34;"
-set "PSREG=%PSREG%$arg=$x+$d+'\run-hidden.vbs'+$x+' '+$x+$d+'\checkin.bat'+$x;"
+set "PSREG=%PSREG%$arg=$x+$d+'\run-hidden.vbs'+$x+' '+$x+$d+'\checkin.bat --auto'+$x;"
 set "PSREG=%PSREG%$a=New-ScheduledTaskAction -Execute 'wscript.exe' -Argument $arg;"
 set "PSREG=%PSREG%$s=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10);"
 set "PSREG=%PSREG%$p=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited;"
@@ -272,18 +303,24 @@ rem express, so it comes from an XML template. [IO.File]::ReadAllText reads it
 rem without BOM surprises; $d is the project folder reused from above.
 set "PS_RESUME_XML=%SCRIPT_DIR%\scheduled-task.resume.xml"
 set "PSREG=%PSREG%$rx=[IO.File]::ReadAllText($env:PS_RESUME_XML);"
-set "PSREG=%PSREG%$rx=$rx.Replace('__CHECKIN_VBS__',$d+'\run-hidden.vbs').Replace('__CHECKIN_BAT__',$d+'\checkin.bat').Replace('__USER__',$env:USERNAME);"
+set "PSREG=%PSREG%$rx=$rx.Replace('__CHECKIN_VBS__',$d+'\run-hidden.vbs').Replace('__CHECKIN_BAT__',$d+'\checkin.bat --auto').Replace('__USER__',$env:USERNAME);"
 set "PSREG=%PSREG%Register-ScheduledTask -TaskName '%TASK_RESUME%' -Xml $rx -Force -ErrorAction Stop|Out-Null"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "%PSREG%" >nul 2>&1
+rem Judge the registration by the command's own exit code first. :tasks_ok only
+rem checks that a task exists and points here, so a FAILED re-register leaves the
+rem previous definition in place and would be reported as success.
+set "PSREG_RC="
+if errorlevel 1 set "PSREG_RC=1"
 call :now
 call :tasks_ok
-if errorlevel 1 (
-    set "REG_FAILED=1"
-    call :say WARN: task registration failed - opening the log in notepad.
-    call :say WARN: run this once from an account that may manage tasks; see README section 3.
-) else (
-    call :say Scheduled tasks registered OK: %TASK_DAILY% six times a day, %TASK_STARTUP% at logon, %TASK_RESUME% on wake.
-)
+if errorlevel 1 set "PSREG_RC=1"
+if defined PSREG_RC goto reg_failed
+call :say Scheduled tasks registered OK: %TASK_DAILY% six times a day, %TASK_STARTUP% at logon, %TASK_RESUME% on wake.
+exit /b 0
+:reg_failed
+set "REG_FAILED=1"
+call :say WARN: task registration failed - opening the log in notepad.
+call :say WARN: run this once from an account that may manage tasks; see README section 3.
 exit /b 0
 
 :tasks_ok
@@ -369,6 +406,17 @@ if defined RC exit /b %RC%
 exit /b 0
 
 :pause_if_double_clicked
-rem Keep the window open only when the user double-clicked this file.
-echo %CMDCMDLINE% | findstr /i /l /c:"%~f0" >nul && pause
+rem Pause only when Explorer started this file. Its command line is
+rem   cmd.exe /c ""X:\path\checkin.bat" "   - note the trailing space.
+rem A scheduled task runs
+rem   cmd.exe /c "X:\path\checkin.bat"      - no trailing space.
+rem Probing CMDCMDLINE for the path alone matches BOTH, which used to leave
+rem triggered runs waiting on a keypress forever. The quotes are stripped
+rem first, then only a trailing space counts.
+set "DBLCLK="
+set "CMDL=%CMDCMDLINE:"=%"
+if "%CMDL:~-1%"==" " set "DBLCLK=1"
+if defined DBLCLK pause
+set "CMDL="
+set "DBLCLK="
 exit /b 0

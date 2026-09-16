@@ -1858,7 +1858,7 @@ def show_tasks() -> int:
         (TASK_RESUME, "从睡眠 / 休眠恢复时触发"),
     )
     log(f"入口脚本：{entry}")
-    log(f"计划任务动作：wscript.exe -> {ENTRY_VBS} -> {ENTRY_BAT}，全程隐藏窗口，不弹 cmd 黑框")
+    log(f"计划任务动作：wscript.exe -> {ENTRY_VBS} -> {ENTRY_BAT} --auto，全程隐藏窗口、不回显、不弹 cmd 黑框")
     if not ENTRY_PATH.exists():
         log(_line("异常", f"当前目录下找不到 {ENTRY_BAT}，请确认脚本是否被移动或删除"))
     elif not (ENTRY_PATH.parent / ENTRY_VBS).exists():

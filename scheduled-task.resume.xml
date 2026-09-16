@@ -4,9 +4,17 @@
   Registered by checkin.bat as AICreditPunch-Resume. checkin.bat replaces the
   placeholders before handing this file to Register-ScheduledTask -Xml:
 
-    __CHECKIN_VBS__   absolute path of run-hidden.vbs in the project folder
-    __CHECKIN_BAT__   absolute path of checkin.bat in the project folder
-    __USER__          the current user name (interactive token, no password stored)
+    CHECKIN_VBS       absolute path of run-hidden.vbs in the project folder
+    CHECKIN_BAT       absolute path of checkin.bat in the project folder
+    USER              the current user name (interactive token, no stored password)
+
+  The names above are deliberately written WITHOUT the __...__ wrapper: this
+  comment is part of the string handed to Register-ScheduledTask, so a spelled
+  out placeholder would be substituted here too. CHECKIN_BAT resolves to the bat
+  path plus the silent-run switch, and that switch starts with a double hyphen
+  that is illegal inside an XML comment - the whole file then fails with
+  "task XML is malformed ... incorrect comment syntax". Never write the wrapper
+  or the switch inside a comment in this file.
 
   Why XML: New-ScheduledTaskTrigger cannot express an event trigger, and this is
   the only trigger type that fires on resume. Laptops rarely log a plain "logon"
@@ -31,7 +39,7 @@
 
   Do NOT add an <?xml?> declaration back: Register-ScheduledTask -Xml takes a
   string, and a string starting with a declaration is rejected with
-  "The task XML is malformed. (1,40) 错误: 无法切换编码" even though the XML
+  "The task XML is malformed. (1,40) ... cannot switch encoding" even though the XML
   itself is valid. The declaration is only needed when a file is handed to
   schtasks /create /xml, which this project does not do.
 
