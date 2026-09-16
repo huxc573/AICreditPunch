@@ -76,6 +76,7 @@ python checkin.py --workbuddy-only | --trae-only     # 单平台
 python checkin.py --status-only    # 只查状态不领取     python checkin.py --dry-run   # 只校验配置
 python checkin.py --debug          # 打印脱敏响应       python checkin.py --today     # 日常查看（纯本地）
 python checkin.py --tasks          # 检查三个计划任务（只读）
+python checkin.py --test-notify    # 只发一条测试通知，验证推送配置（不签到）
 python checkin.py --init-workbuddy | --init-trae | --init
 ```
 
@@ -240,6 +241,11 @@ bat 相关特性（最新在前、弹记事本）不适用；Trae 依赖设备�
   `corpid` 企业ID、`corpsecret` 自建应用 Secret、`agentid` AgentId、`touser` 接收人（`@all` 全员，多个用 `|`）。
 - 两类可同时启用，任一留空则跳过；**只从 `config.json` 读**（环境变量覆盖未实现）。
 - 日志自动脱敏（`key=abc1***yz`；`corpsecret` / `access_token` → `***`）；通知失败只记日志，不影响签到。
+
+**验证配置：`checkin.bat --test-notify`** —— 只发一条测试消息，不签到、不改「当日已推送」去重记录，
+逐渠道回报成功或失败原因。企业微信高频失败码：`40001` secret 不对、
+`60020` 调用方 IP 不在**可信 IP** 白名单（后台 → 应用 → 企业可信 IP）、
+`81013` `touser` 不在应用**可见范围**（填 UserID，不是手机号或姓名）、`60011` agentid 与 Secret 不匹配。
 
 ## 5. 安全
 

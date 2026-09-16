@@ -386,6 +386,7 @@ echo   checkin.bat --uninstall     remove all three scheduled tasks
 echo   checkin.bat --logs          open the local log in notepad
 echo   checkin.bat --tasks         check the scheduled tasks, read-only
 echo   checkin.bat --today         daily view: today status + last run
+echo   checkin.bat --test-notify   send one test notification
 echo   checkin.bat --help          show this help
 echo.
 echo Any other --option goes straight to checkin.py, for example:

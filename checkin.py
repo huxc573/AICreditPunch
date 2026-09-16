@@ -1640,36 +1640,50 @@ def trae_login() -> int:
 # =========================================================================== #
 
 
-def _send_wecom_app(notify: Dict[str, Any], title: str, content: str) -> bool:
+def _wecom_hint(code: Any) -> str:
+    """企业微信错误码 → 最可能的原因，只列高频几条。"""
+    return {40001: "corpsecret 不对（别把「应用 Secret」和「通讯录 Secret」弄混）",
+            40013: "corpid 不对",
+            60011: "agentid 与该 Secret 不匹配，或应用未授权",
+            60020: "调用方 IP 不在可信 IP 白名单（企业微信后台 → 应用 → 企业可信 IP）",
+            81013: "touser 中的成员不在应用可见范围内（要填 UserID，不是手机号或姓名）",
+            82001: "touser 不能为空"}.get(_to_int(code, -1), "")
+
+
+def _send_wecom_app(notify: Dict[str, Any], title: str, content: str) -> Tuple[bool, str]:
+    """推送企业微信应用消息，返回 `(是否成功, 失败原因)`；渠道未配置时原因为空串。"""
     wecom = notify.get("wecom") or {}
     corpid = clean_text(wecom.get("corpid"))
     corpsecret = clean_text(wecom.get("corpsecret"))
     agentid = clean_text(wecom.get("agentid"))
     touser = clean_text(wecom.get("touser")) or "@all"
     if not (corpid and corpsecret and agentid):
-        return False
-    tok, _, err = http_get(
+        return False, ""
+    st, tok, err = http_get(
         f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={corpid}&corpsecret={corpsecret}",
         {}, DEFAULT_TIMEOUT,
     )
-    if tok is None or not isinstance(tok, dict) or tok.get("errcode") not in (0, None):
-        log(f"企业微信获取 token 失败：{tok.get('errmsg') if isinstance(tok, dict) else err}")
-        return False
+    if not isinstance(tok, dict) or tok.get("errcode") not in (0, None):
+        reason = clean_text(tok.get("errmsg")) if isinstance(tok, dict) else (clean_text(err) or "HTTP=" + str(st))
+        hint = _wecom_hint(tok.get("errcode") if isinstance(tok, dict) else None)
+        return False, "gettoken 失败：" + (reason or "无响应") + ("（" + hint + "）" if hint else "")
     access = tok.get("access_token")
     body = {"touser": touser, "msgtype": "text", "agentid": int(agentid) if agentid.isdigit() else agentid,
             "text": {"content": f"{title}\n\n{content}"}}
     send_url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access}"
     st, pl, er = http_post(send_url, {}, body, DEFAULT_TIMEOUT, DEFAULT_RETRIES)
     if st == 200 and isinstance(pl, dict) and pl.get("errcode") == 0:
-        return True
-    log(f"企业微信推送失败：{pl.get('errmsg') if isinstance(pl, dict) else er}")
-    return False
+        return True, ""
+    reason = clean_text(pl.get("errmsg")) if isinstance(pl, dict) else clean_text(er)
+    hint = _wecom_hint(pl.get("errcode") if isinstance(pl, dict) else None)
+    return False, "message/send 失败：" + (reason or ("HTTP=" + str(st))) + ("（" + hint + "）" if hint else "")
 
 
-def _send_webhook(url: str, title: str, content: str) -> bool:
+def _send_webhook(url: str, title: str, content: str) -> Tuple[bool, str]:
+    """推送任意 webhook，返回 `(是否成功, 失败原因)`；url 为空时原因为空串。"""
     url = clean_text(url)
     if not url:
-        return False
+        return False, ""
     text = f"{title}\n\n{content}"
     if "qyapi.weixin.qq.com" in url and "webhook" in url:
         body = {"msgtype": "markdown", "markdown": {"content": text.replace("\n", "\n\n")}}
@@ -1685,9 +1699,8 @@ def _send_webhook(url: str, title: str, content: str) -> bool:
         body = {"msgtype": "text", "text": {"content": text}}
     st, pl, er = http_post(url, {}, body, DEFAULT_TIMEOUT, DEFAULT_RETRIES)
     if st == 200:
-        return True
-    log(f"Webhook 推送失败：HTTP={st} {er}")
-    return False
+        return True, ""
+    return False, (("HTTP=" + str(st) + " ") if st else "") + (clean_text(er) or "无响应")
 
 
 def send_notify(notify: Dict[str, Any], title: str, content: str) -> bool:
@@ -1696,12 +1709,68 @@ def send_notify(notify: Dict[str, Any], title: str, content: str) -> bool:
     ok = False
     webhook = clean_text((notify.get("webhook") or {}).get("url"))
     if webhook:
-        ok = _send_webhook(webhook, title, content) or ok
-    if _send_wecom_app(notify, title, content):
-        ok = True
+        good, detail = _send_webhook(webhook, title, content)
+        if not good:
+            log(f"Webhook 推送失败：{detail}")
+        ok = good or ok
+    good, detail = _send_wecom_app(notify, title, content)
+    if not good and detail:
+        log(f"企业微信推送失败：{detail}")
+    ok = ok or good
     if not ok:
         log("通知：未配置有效渠道或推送失败（不影响签到）")
     return ok
+
+
+def test_notify(notify: Dict[str, Any]) -> int:
+    """单独发一条测试通知，验证两个渠道；不签到、不改动当日去重记录。"""
+    notify = notify if isinstance(notify, dict) else {}
+    webhook = clean_text((notify.get("webhook") or {}).get("url"))
+    wecom = notify.get("wecom") or {}
+    corpid = clean_text(wecom.get("corpid"))
+    corpsecret = clean_text(wecom.get("corpsecret"))
+    agentid = clean_text(wecom.get("agentid"))
+    touser = clean_text(wecom.get("touser")) or "@all"
+    missing = [k for k, v in (("corpid", corpid), ("corpsecret", corpsecret), ("agentid", agentid)) if not v]
+    has_wecom = not missing            # 三个字段齐了才发得出去
+    touched_wecom = len(missing) < 3   # 填了至少一个字段
+
+    log("通知测试：只发测试消息，不签到、不改动当日去重记录。")
+    log("渠道 A Webhook：" + (_mask_url(webhook) if webhook else "未配置（notify.webhook.url 为空）"))
+    if touched_wecom:
+        head = corpid if len(corpid) <= 6 else corpid[:6] + "***"
+        log("渠道 B 企业微信应用：corpid=" + (head or "(空)") + " agentid=" + (agentid or "(空)")
+            + " corpsecret=" + (("已填 " + str(len(corpsecret)) + " 位") if corpsecret else "(空)")
+            + " touser=" + touser + ("" if has_wecom else "（配置不完整，缺 " + "/".join(missing) + "）"))
+    else:
+        log("渠道 B 企业微信应用：未配置（notify.wecom 的 corpid / corpsecret / agentid 全为空）")
+    if not webhook and not touched_wecom:
+        log("两个渠道都未配置，没有可测试的对象；填好 config.json 的 notify 段再重跑本命令（见 README §4）。")
+        log("本次脚本执行完毕。")
+        log("")
+        return 1
+
+    title = "【测试】每日签到通知渠道"
+    content = ("这是一条由 checkin.py --test-notify 发出的测试消息。\n"
+               "收到即说明该渠道可用；真实签到通知只在当日首次签到成功后推送一次。")
+    rc = 0
+    if webhook:
+        good, detail = _send_webhook(webhook, title, content)
+        log("渠道 A Webhook：" + ("推送成功" if good else "推送失败：" + detail))
+        rc |= 0 if good else 1
+    if touched_wecom:
+        if has_wecom:
+            good, detail = _send_wecom_app(notify, title, content)
+            log("渠道 B 企业微信应用：" + ("推送成功" if good else "推送失败：" + detail))
+            rc |= 0 if good else 1
+        else:
+            log("渠道 B 企业微信应用：未发送 —— 配置不完整，缺 " + "/".join(missing))
+            rc = 1
+    log("请在接收端确认是否收到这条消息。" if not rc else
+        "有未完成的渠道，原因见上面每行；企业微信最常见的是可信 IP 白名单与 touser 可见范围。")
+    log("本次脚本执行完毕。")
+    log("")
+    return rc
 
 
 # =========================================================================== #
@@ -2029,7 +2098,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="一体化每日签到（WorkBuddy + Trae）",
         epilog="初始化：--init-workbuddy（导入本机凭据）/ --init-trae（浏览器登录）/ --init（两者依次）；"
-               "查看：--today（今日状态，纯本地）/ --tasks（计划任务检查）",
+               "查看：--today（今日状态，纯本地）/ --tasks（计划任务检查）/ --test-notify（发一条测试推送）",
     )
     p.add_argument("--init", action="store_true", help="依次初始化 WorkBuddy 与 Trae")
     p.add_argument("--init-workbuddy", action="store_true",
@@ -2045,6 +2114,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tasks", action="store_true", dest="tasks",
                    help="检查本脚本的三个计划任务是否注册、是否指向当前目录（只读）")
     p.add_argument("--dry-run", action="store_true", help="只加载并校验配置，不发送网络请求")
+    p.add_argument("--test-notify", "--notify-test", action="store_true", dest="test_notify",
+                   help="只发一条测试通知，验证 webhook / 企业微信应用是否可用（不签到、不改去重状态）")
     p.add_argument("--debug", action="store_true", help="打印脱敏的原始响应，用于排错")
     p.add_argument("--version", action="version", version=VERSION)
     return p.parse_args()
@@ -2115,6 +2186,9 @@ def main() -> int:
         log("本次脚本执行完毕。")
         log("")
         return 1
+
+    if args.test_notify:
+        return test_notify(cfg.get("notify") or {})
 
     wb = workbuddy_accounts(cfg) if cfg.get("accounts") else []
     trae = trae_accounts(cfg) if cfg.get("trae_accounts") else []
