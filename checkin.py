@@ -1,35 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""一体化每日签到脚本（WorkBuddy + Trae），仅依赖 Python 标准库。
-
-设计目标：单个文件即可迁移到云端 / 青龙面板 / 其它设备，迁移时只需带上
-`checkin.py` + `config.json`（Trae 凭证也统一存进 config.json，无需单独 auths 目录）。
-
-支持的平台：
-  - WorkBuddy：access_token 直连 API，无需浏览器（移植自上游 workbuddy_checkin.py v2.2.0 的接口）
-  - Trae Work（字节，trae.cn 国内版）：移植自 https://github.com/xz0609/trae-work-checkin-ql
-    · 凭证来自浏览器 OAuth 登录（`python checkin.py --init-trae`）。签到依赖本机真实设备指纹，
-      因此同一账号每天只能在"做过登录的那台设备"上领取；换设备/云端需先在本机跑一次 `--init-trae`。
-
-内置能力（原 notify.py / auto_checkin.py 已并入本文件并删除）：
-  - 通知：Webhook（群机器人/Server酱/钉钉/飞书/Bark）+ 企业微信「应用」双通道，配置在 config.json 的 notify 段
-  - 去重与限流：当日首次成功推一次；失败按每天上限 + 最小间隔限流
-  - 幂等：两平台领取前都先查状态，已签到直接跳过
-
-用法：
-  python checkin.py                      # 跑所有已启用的平台
-  python checkin.py --workbuddy-only     # 只跑 WorkBuddy
-  python checkin.py --trae-only          # 只跑 Trae
-  python checkin.py --status-only        # 只查状态不领取
-  python checkin.py --dry-run            # 只校验配置
-  python checkin.py --debug              # 打印脱敏响应
-  python checkin.py --version
-
-初始化（每个平台一次，用法与其它参数一致）：
-  python checkin.py --init-workbuddy     # 导入本机 WorkBuddy 桌面端登录凭据（可配合 --auth-file）
-  python checkin.py --init-trae          # Trae 浏览器 OAuth 登录
-  python checkin.py --init               # 依次初始化两个平台
-"""
+"""一体化每日签到脚本（WorkBuddy + Trae），仅依赖 Python 标准库。"""
 
 from __future__ import annotations
 
@@ -85,11 +56,7 @@ ENTRY_PATH = HERE / ENTRY_BAT
 
 
 def log_file_path() -> Path:
-    """日志文件位置：直接放在 `%APPDATA%` 根下，即 `%APPDATA%\\AICreditPunch.log`。
-
-    Windows 上 `%APPDATA%` = `C:\\Users\\<你>\\AppData\\Roaming`；
-    其它平台回退到 `~/.config/AICreditPunch.log`；再失败则退回脚本同目录。
-    """
+    """日志文件位置：直接放在 `%APPDATA%` 根下，即 `%APPDATA%\\AICreditPunch.log`。"""
     base = os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     try:
         d = Path(base)
@@ -159,12 +126,7 @@ def open_log_in_notepad() -> None:
 
 
 def _request_open_log() -> None:
-    """请求「打开日志」，按调用方决定时机。
-
-    由 `checkin.bat` 调用时（环境变量 `ACP_LOG_OWNER=bat`）**不立刻打开**，只写一个
-    标记文件；bat 把本次输出前置到日志顶端后再弹记事本，否则记事本显示的是本次运行
-    之前的旧内容。直接 `python checkin.py` 时没有 bat 兜底，就立即打开。
-    """
+    """请求「打开日志」，按调用方决定时机。"""
     if os.environ.get("ACP_LOG_OWNER") == "bat":
         try:
             OPEN_LOG_FLAG.parent.mkdir(parents=True, exist_ok=True)
@@ -243,10 +205,7 @@ def _num_of(value: Any) -> Optional[float]:
 
 
 def _fmt_num(value: Any) -> str:
-    """积分数字文案：整数值不带小数（`2,100`），非整数保留两位（`146.68`）。
-
-    与桌面端「套餐与积分」的展示口径一致（千分位 + 最多两位小数）。
-    """
+    """积分数字文案：整数值不带小数（`2,100`），非整数保留两位（`146.68`）。"""
     num = _num_of(value)
     if num is None:
         return str(value)
@@ -258,17 +217,7 @@ def _fmt_num(value: Any) -> str:
 
 def _fmt_credit(today: Optional[int] = None, streak: Optional[int] = None,
                 balance: Any = None) -> str:
-    """积分明细文本（中文）；字段缺失自动省略，保证两个平台写法一致。
-
-    - `balance` 必须是**账号真实可用积分**，两平台来源不同：
-      WorkBuddy 走 `/billing/meter/get-user-resource-summary`（见
-      `WorkBuddyClient.balance_text`）；Trae 走 `ide_user_ent_usage` 的
-      `usage_summary.total_amount - consumed_amount`。
-      ⚠️ 别再用 WorkBuddy 签到报文里的 `total_credits` —— 那是活动期内累计获得，
-      与账号可用余额无关（实测差一个数量级）。
-    - `today` 是「本次签到积分」：WorkBuddy 取活动的 `daily_credit`；Trae 取签到前后
-      余额差的实测值（平台声明的 `credits + extra_credits` 会虚报，见 `_trae_gain`）。
-    """
+    """积分明细文本（中文）；字段缺失自动省略，保证两个平台写法一致。"""
     items = []
     if today is not None:
         items.append(f"本次 +{_fmt_num(today)}")
@@ -280,11 +229,7 @@ def _fmt_credit(today: Optional[int] = None, streak: Optional[int] = None,
 
 
 def _line(state: str, detail: str = "") -> str:
-    """日志正文：`{状态}；{明细}`。
-
-    平台名不重复 —— 每个平台块已有 `===== 平台 =====` 标题，调用处统一写
-    `log(f"[{name}] {_line(状态, 明细)}")`，于是每行是「账号 + 状态 +（可选）明细」。
-    """
+    """日志正文：`{状态}；{明细}`。"""
     return state + (f"；{detail}" if detail else "")
 
 
@@ -473,10 +418,7 @@ def wb_validated_base(value: Any) -> str:
 
 
 class WbReply:
-    """一次调用的「HTTP 码 + 报文」的语义化解读。
-
-    调用方只读属性、不再自己做字段探测，于是判定规则集中在一处，好改也好测。
-    """
+    """一次调用的「HTTP 码 + 报文」的语义化解读。"""
 
     __slots__ = ("http", "payload", "transport_error")
 
@@ -531,12 +473,7 @@ class WbReply:
 
     @property
     def credits(self) -> Tuple[Optional[int], Optional[int]]:
-        """(本次积分, 连续天数)；缺失一律 None。
-
-        ⚠️ 报文里的 `total_credits` **不是**账号可用积分，而 = 每日额度 × 活动期内
-        签到天数（实测：每日 100、签到 2 天 → 200，而账号真实余额两千多）。
-        所以这里不把它当余额返回，真实余额另走资源包接口。
-        """
+        """(本次积分, 连续天数)；缺失一律 None。"""
         scope = self._scope()
         today = next((scope[key] for key in WB_TODAY_CREDIT_KEYS if scope.get(key) is not None), None)
         streak = scope.get(WB_STREAK_KEY)
@@ -595,12 +532,7 @@ class WorkBuddyClient:
 
     def _packages_remain(self, route: str, codes: List[str], extra: Dict[str, Any],
                          sub_mark: str = "") -> Optional[float]:
-        """某个资源包接口下各包剩余额度之和；取不到返回 None（不猜 0）。
-
-        `sub_mark` 非空时只累加 `SubProductCode` 含该标记的包 —— 免费包列表里混着
-        套餐本体与赠送包，必须按标记筛（见 `WB_BONUS_MARK`）。
-        接口成功但一个包都没有时返回 0.0，语义是「确实没有这个池子」。
-        """
+        """某个资源包接口下各包剩余额度之和；取不到返回 None（不猜 0）。"""
         body: Dict[str, Any] = {
             "PageNumber": 1,
             "PageSize": WB_PACKAGE_PAGE_SIZE,
@@ -627,18 +559,7 @@ class WorkBuddyClient:
         return total
 
     def balance(self) -> Tuple[Optional[str], Optional[str]]:
-        """账号真实可用积分，返回 (余额文本, 构成文本)；查不到一律 (None, None)。
-
-        与桌面端「设置 - 套餐与积分」同口径，共三条同源接口：
-          · get-user-resource-summary       → 各资源包周期总额 / 剩余（总剩余积分）
-          · get-user-resource-free-packages → 赠送包明细（= 平台奖励积分）
-          · get-user-resource-paid-packages → 付费包明细（= 购买积分）
-        总剩余取汇总接口各包 `CycleRemainCapacity` 之和（与桌面端大数字一致）；
-        构成按「赠送包 = 平台奖励、付费包 = 购买、其余 = 套餐基础」拆分：
-        赠送包靠 `SubProductCode` 里的 `bonus_pack` 标记识别（免费包列表里套餐本体
-        与赠送包混在一起，实测区分后才能对上桌面端的「套餐基础 / 平台奖励」两行）。
-        两个明细接口任一失败、或拆出来为负（口径对不上）时只报总额，**不靠猜**。
-        """
+        """账号真实可用积分，返回 (余额文本, 构成文本)；查不到一律 (None, None)。"""
         _, payload, _ = self._raw(WB_ROUTE_RESOURCE_SUMMARY, {})
         data = (payload or {}).get("data") if isinstance(payload, dict) else None
         packages = data.get("Packages") if isinstance(data, dict) else None
@@ -1091,11 +1012,7 @@ def _trae_headers(acc: Dict[str, Any], device_id: str) -> Dict[str, str]:
 
 
 def _trae_device_pool() -> List[str]:
-    """扫描本机已安装 Trae 客户端的真实设备池（与参考仓库一致）。
-
-    设备配置文件固定位于 <TraeAppDir>/ahanet/tt_net_config.config（或 <TraeAppDir>/tt_net_config.config），
-    直接按已知路径读取，**不递归扫描**——否则对含大缓存的 Trae 目录做 rglob 每次运行会慢 8s+。
-    """
+    """扫描本机已安装 Trae 客户端的真实设备池（与参考仓库一致）。"""
     home = Path.home()
     app = os.environ.get("APPDATA")
     names = ("TRAE SOLO CN", "Trae CN", "Trae", "TRAE")
@@ -1206,11 +1123,7 @@ def _trae_refresh(acc: Dict[str, Any]) -> bool:
 
 
 def _trae_flag(payload: Optional[Dict[str, Any]], keys: Tuple[str, ...]) -> Optional[bool]:
-    """在 payload / payload.data 里按 keys 顺序找布尔标记；字段不存在返回 None。
-
-    字符串 "true"/"1" 视为真、"false"/"0" 视为假，兼容把布尔序列化成字符串的接口。
-    keys 的先后就是优先级：先命中的那个字段说了算。
-    """
+    """在 payload / payload.data 里按 keys 顺序找布尔标记；字段不存在返回 None。"""
     if not isinstance(payload, dict):
         return None
     data = payload.get("data") if isinstance(payload.get("data"), dict) else None
@@ -1233,12 +1146,7 @@ def _trae_flag(payload: Optional[Dict[str, Any]], keys: Tuple[str, ...]) -> Opti
 
 
 def _trae_status_checked(payload: Optional[Dict[str, Any]]) -> bool:
-    """状态查询是否表示「今日已签到」。
-
-    只认**明确标记**（checked_in 等）与**明确文案**；业务码一概不看。
-    Trae 的 status 在「未签到」时同样返回 code=0 / message=success，
-    拿业务码兜底就会把「每次查询成功」当成「今天已经签过」。
-    """
+    """状态查询是否表示「今日已签到」。"""
     flag = _trae_flag(payload, TRAE_CHECKED_FLAGS)
     if flag is not None:
         return flag
@@ -1247,10 +1155,7 @@ def _trae_status_checked(payload: Optional[Dict[str, Any]]) -> bool:
 
 
 def _trae_claim_ok(payload: Optional[Dict[str, Any]]) -> bool:
-    """领奖调用是否成功：业务码成功，或明确说明今天已经领过。
-
-    与 status 不同，claim 的 code=0/200 就是「领奖成功」本身，所以这里可以用。
-    """
+    """领奖调用是否成功：业务码成功，或明确说明今天已经领过。"""
     if _business_ok(payload):
         return True
     return _trae_status_checked(payload)
@@ -1276,13 +1181,7 @@ def _trae_pick_int(payload: Optional[Dict[str, Any]], *keys: str) -> Optional[in
 
 
 def _trae_declared_credit(payload: Optional[Dict[str, Any]]) -> Optional[int]:
-    """平台声明的「本次签到积分」= `credits`；没有该字段则 None。
-
-    ⚠️ **不要**把 `extra_credits` 加进来。实测（2026-09-15）：status 声明
-    `credits=150 / extra_credits=50`，但签到后余额只涨 150，权益包清单里也只多出
-    一笔 `credits_limit=150` 的「签到奖励」，`extra_credits` 根本没形成权益包、
-    实际未到账。把两者相加会虚报（旧日志显示「本次 +200 / 余额 34→184」即此因）。
-    """
+    """平台声明的「本次签到积分」= `credits`；没有该字段则 None。"""
     return _trae_pick_int(payload, *TRAE_CREDIT_KEYS)
 
 
@@ -1295,10 +1194,7 @@ def _trae_gain(before: Optional[int], after: Optional[int]) -> Optional[int]:
 
 
 def _trae_confirm(headers: Dict[str, str], timeout: int, retries: int) -> Optional[Dict[str, Any]]:
-    """领奖后回查状态：确认到账返回状态报文，否则 None。
-
-    服务端落账可能有几秒延迟，所以按 TRAE_VERIFY_WAITS 的节奏多查几次。
-    """
+    """领奖后回查状态：确认到账返回状态报文，否则 None。"""
     for wait in TRAE_VERIFY_WAITS:
         if wait:
             time.sleep(wait)
@@ -1309,12 +1205,7 @@ def _trae_confirm(headers: Dict[str, str], timeout: int, retries: int) -> Option
 
 
 def _trae_query_credits(acc: Dict[str, Any], device_id: str, timeout: int, retries: int) -> Optional[int]:
-    """查询 Trae 当前积分余额（来自 ide_user_ent_usage 接口），返回当前可用积分或 None。
-
-    真实响应结构（实测）：usage_summary.total_amount=总额、consumed_amount=已用；
-    余额展示统一为"当前积分余额 X"，因此返回 `总额 - 已用`（可用积分）。
-    若无法取得已用量，则回退到总额；再无法取得则回退到套餐额度求和。
-    """
+    """查询 Trae 当前积分余额（来自 ide_user_ent_usage 接口），返回当前可用积分或 None。"""
     st, pl, err = http_post(TRAE_CREDITS_URL, _trae_headers(acc, device_id), {}, timeout, retries)
     if pl is None:
         log(f"[{acc.get('screenName') or acc.get('userId') or 'Trae账号'}] "
@@ -1650,8 +1541,6 @@ def trae_login() -> int:
 # =========================================================================== #
 # 通知（内置，移植 notify.py：Webhook + 企业微信应用，双通道）
 # =========================================================================== #
-def _webhook_mask(url: str) -> str:
-    return _mask_url(url)
 
 
 def _send_wecom_app(notify: Dict[str, Any], title: str, content: str) -> bool:
@@ -1803,12 +1692,7 @@ def _ps(script: str) -> Optional[str]:
 
 
 def _task_snapshot() -> Optional[Dict[str, Dict[str, Any]]]:
-    """查询三个计划任务：是否存在 / 动作 / 下次运行 / 上次运行与结果。
-
-    属性名一律用英文（`name` / `action` / `state` / `next` / `last` / `result`），
-    避开 `schtasks /fo LIST /v` 那种「字段名随系统语言变化」的解析坑。
-    PowerShell 不可用时返回 None，调用方退化为「只判存在」。
-    """
+    """查询三个计划任务：是否存在 / 动作 / 下次运行 / 上次运行与结果。"""
     names = ",".join("'%s'" % n for n in (TASK_DAILY, TASK_STARTUP, TASK_RESUME))
     script = (
         "$o=@();"
@@ -1867,10 +1751,7 @@ def _task_result_text(result: Any) -> str:
 
 
 def show_tasks() -> int:
-    """检查本脚本的三个计划任务（只读，不做任何修改）。
-
-    返回 0 = 三个任务都正常；1 = 缺失 / 指向别处 / 查不到。
-    """
+    """检查本脚本的三个计划任务（只读，不做任何修改）。"""
     log("===== 计划任务检查 =====")
     if os.name != "nt":
         log("计划任务检查只适用于 Windows；Linux / macOS 请用 crontab（见 README §3.5）。")
@@ -1957,10 +1838,7 @@ def _log_blocks(text: str) -> List[List[str]]:
 
 
 def show_today() -> int:
-    """日常查看：今日签到状态 + 计划任务下一班次 + 最近一次运行摘要。
-
-    **纯本地只读，不发送任何网络请求**，随时可跑。返回 0 = 今日各平台都已签到，1 = 有待办。
-    """
+    """日常查看：今日签到状态 + 计划任务下一班次 + 最近一次运行摘要。"""
     today = date.today()
     today_iso = today.isoformat()
     state = load_state()

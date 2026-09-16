@@ -4,48 +4,29 @@ setlocal
 rem ===================================================================
 rem  AICreditPunch - Windows entry point
 rem
-rem    checkin.bat               run the check-in and auto-install the tasks
-rem    checkin.bat --install     reinstall the scheduled tasks
-rem    checkin.bat --uninstall   remove all three scheduled tasks
-rem    checkin.bat --logs        open the local log in notepad
-rem    checkin.bat --help        show usage
+rem    (no argument)             run the check-in, auto-install the tasks
+rem    --install / --uninstall   (re)install / remove the three tasks
+rem    --logs / --help           open the log / show usage
 rem
-rem  --auto is internal: the scheduled tasks pass it so a triggered run stays
-rem  silent - no console output and no pause. A manual run shows the same text
-rem  live on the console AND in the log: checkin.py prints every line to stdout
-rem  and, when ACP_RUN_LOG is set, appends it to that temp file too; this file
-rem  then prepends the temp file to the top of the real log. Under --auto the
-rem  bat also sets ACP_QUIET=1, so checkin.py skips the console entirely.
+rem  Subcommands are --prefixed; only help also answers to -h, /? and help.
+rem  Any other --option goes straight to checkin.py, e.g. --tasks (task check,
+rem  read-only), --today (daily view), --status-only, --version.
 rem
-rem  Three scheduled tasks are managed here (see README section 3.3):
-rem    AICreditPunch-Daily     six daily triggers, StartWhenAvailable
-rem    AICreditPunch-Startup   at user logon
-rem    AICreditPunch-Resume    on resume from sleep or hibernate; it is
-rem                            registered from scheduled-task.resume.xml
-rem                            because New-ScheduledTaskTrigger cannot
-rem                            express an event trigger
+rem  --auto is internal: the tasks pass it so a triggered run stays silent.
+rem  A manual run shows the same text on the console and in the log -
+rem  checkin.py prints it and appends it to ACP_RUN_LOG, this file prepends
+rem  that temp file to the log.
 rem
-rem  Every subcommand is --prefixed. Only help keeps a short spelling:
-rem  --help, -h, /? and plain help all print the usage. The bare words
-rem  install, uninstall and logs are NOT valid any more.
+rem  Tasks managed here (README 3.3): AICreditPunch-Daily (six triggers a day,
+rem  StartWhenAvailable), -Startup (at logon), -Resume (on resume from sleep,
+rem  registered from scheduled-task.resume.xml - an event trigger cannot be
+rem  expressed with New-ScheduledTaskTrigger).
 rem
-rem  Any other --option is forwarded to checkin.py unchanged, e.g.
-rem    checkin.bat --tasks         check the three scheduled tasks, read-only
-rem    checkin.bat --today         daily view - today's status and last run
-rem    checkin.bat --status-only   query the platforms without claiming
-rem    checkin.bat --version       print the script version
-rem
-rem  Keep this file ASCII-only with CRLF line endings: non-ASCII or LF
-rem  breaks parsing under cmd.exe with a GBK code page. Never put
-rem  parentheses inside echo text that sits in an if-block, or cmd
-rem  will close the block early and the script dies with a syntax error.
-rem
-rem  Every line this file writes into the log must be ASCII. Never echo
-rem  %date% or %time%: under a Chinese code page they emit localized
-rem  text such as the Chinese word for Monday and corrupt the UTF-8 log.
-rem
-rem  When task registration fails this file opens the log in notepad, so
-rem  the user sees the WARN line without hunting for the file.
+rem  HARD RULES - this file must stay ASCII-only with CRLF line endings: non
+rem  ASCII or LF breaks cmd.exe under a GBK code page. Never echo %date% or
+rem  %time% (localized text corrupts the UTF-8 log - use :now), and never put
+rem  parentheses into echo text inside an if-block (cmd closes the block early
+rem  and the script dies with a syntax error).
 rem ===================================================================
 
 rem The folder is resolved from this file's own location, so the project
@@ -136,33 +117,38 @@ call :tasks_ok
 if errorlevel 1 call :register_tasks
 
 rem ---------------------------------------------------------------- wait for network
-rem At boot/login WiFi is often not ready yet; the script itself only retries
-rem about 6s, so probe here first and give up after ~40s instead of wasting
-rem this run. ping is the fast gate: a native exe, no interpreter startup,
-rem answers within 1s. The old probe used TcpClient.Connect with NO timeout,
-rem so one unreachable host sat in SYN retries for ~20s per attempt and 24
-rem attempts could stall the run for many minutes. ICMP can be blocked where
-rem TCP still works, so a ping that never answers gets one TCP re-check with
-rem a HARD 3s timeout before we give up.
+rem At boot/login WiFi is often not ready yet, so wait for it rather than let the
+rem check-in fail against a dead link. ping is the fast gate: a native exe, no
+rem interpreter startup, answers within 1s, and the loop leaves the moment it
+rem answers. 100 rounds of (<=1s ping + 2s gap) is about 5 minutes; after that
+rem the run continues with short timeouts. ICMP can be blocked where TCP still
+rem works, so a ping that never answers gets one 443 handshake re-check with a
+rem HARD 3s timeout. timeout /t is skipped when stdin is redirected, so a piped
+rem or hosted run gives up sooner - it never waits longer than this.
 set "N=0"
 if not defined AUTO echo Checking the network ...
 :waitnet
 ping -n 1 -w 1000 %PROBE_HOST% >nul 2>&1
 if not errorlevel 1 goto netok
 set /a N+=1
-if %N% LSS 12 (
+if %N% LSS 100 (
     timeout /t 2 /nobreak >nul 2>&1
     goto waitnet
 )
-rem ping never answered: maybe ICMP is blocked rather than the net being down.
-rem "if not errorlevel 1" is used inside this block on purpose - %ERRORLEVEL%
-rem would be expanded when the block is parsed and would read a stale value.
+rem "if not errorlevel 1" is used below on purpose - %ERRORLEVEL% would be
+rem expanded when the block is parsed and would read a stale value.
 if exist "%PYEXE%" (
     "%PYEXE%" -c "import socket; socket.create_connection(('%PROBE_HOST%', 443), 3).close()" >nul 2>&1
     if not errorlevel 1 goto netok
 )
+rem Still dead. Run anyway with short timeouts: on a link that swallows packets
+rem every request would burn timeout x attempts + backoff ~= 63s, and the run
+rem would pass the task's 10 minute execution limit. Windows then kills it
+rem before :publish_block, so the run never reaches the log at all.
+set "WORKBUDDY_TIMEOUT=10"
+set "WORKBUDDY_RETRIES=0"
 call :now
-call :say WARN: network not reachable after ~40s, running anyway.
+call :say WARN: network not reachable after ~5min, running anyway with short timeouts.
 :netok
 
 call :now
@@ -175,8 +161,7 @@ if not exist "%PYEXE%" (
     exit /b 127
 )
 
-rem No redirection here: python writes straight to this console, so a manual run
-rem is live, and it tees the same lines into %TMPLOG% via ACP_RUN_LOG.
+rem No redirection: python writes to this console and tees into %TMPLOG%.
 "%PYEXE%" checkin.py
 set "RC=%ERRORLEVEL%"
 call :publish_block
@@ -198,8 +183,8 @@ exit /b %RC%
 rem ================================================================ subroutines
 
 :forward
-rem A --option meant for checkin.py: run it in this console. Views such as
-rem --tasks and --today are read-only, so this path never touches the log.
+rem A --option meant for checkin.py. Views such as --tasks / --today are
+rem read-only, so this path never touches the log.
 cd /d "%SCRIPT_DIR%" || exit /b 1
 if not exist "%PYEXE%" (
     echo ERROR: python not found: "%PYEXE%"
@@ -212,14 +197,12 @@ call :pause_if_double_clicked
 exit /b %RC%
 
 :open_log
-rem Open the log in notepad, at most once per run.
+rem Open the log in notepad, at most once per run. Via Start-Process, not
+rem "start notepad": "start" hands the child this script's stdout/stderr
+rem handles, so a piping caller would block until notepad is closed.
 if defined LOG_OPENED exit /b 0
 set "LOG_OPENED=1"
 if not exist "%LOGFILE%" exit /b 0
-rem Open through Start-Process rather than "start notepad": "start" hands the
-rem new process this script's stdout/stderr handles, so a caller that pipes or
-rem redirects the run would block until notepad is closed. Start-Process spawns
-rem a detached process and leaves the caller's handles alone.
 powershell -NoProfile -Command "Start-Process notepad -ArgumentList $env:LOGFILE" >nul 2>&1
 exit /b 0
 
@@ -260,12 +243,9 @@ del "%TMPLOG%" >nul 2>&1
 exit /b 0
 
 :say
-rem Write one ASCII-only line into this run's temp log, and echo it too on a
-rem manual run so the console and the log stay in step. The timestamp prefix is
-rem dropped when :now could not produce an ASCII one, so a broken helper never
-rem injects localized text into the log. Redirect first, then echo: the other
-rem order leaves a trailing space on every log line. Keep the message free of
-rem parentheses - echo inside this file must not look like a block.
+rem One ASCII-only line into this run's temp log, echoed too on a manual run.
+rem Redirect first, then echo - the other order leaves a trailing space on
+rem every log line. Keep the message free of parentheses.
 set "SAYLINE=%*"
 rem Bail out before echo: "echo" with an empty value prints "ECHO is on."
 if not defined SAYLINE exit /b 0
@@ -278,10 +258,9 @@ set "SAYLINE="
 exit /b 0
 
 :now
-rem Locale-independent timestamp for the lines this .bat writes itself.
-rem "-Format s" is the sortable ISO form 2026-09-14T21:44:12: it needs no
-rem inner quotes and no localized date names. Retry once, then give up
-rem quietly (a localized %date% fallback would corrupt the UTF-8 log).
+rem Locale-independent timestamp. "-Format s" is the sortable ISO form
+rem 2026-09-14T21:44:12 - no inner quotes, no localized names. Retry once,
+rem then give up quietly: %date% would corrupt the UTF-8 log.
 set "NOW="
 for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format s" 2^>nul') do set "NOW=%%i"
 if not defined NOW for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format s" 2^>nul') do set "NOW=%%i"
@@ -309,12 +288,10 @@ exit /b 0
 :register_tasks
 call :now
 call :say Scheduled tasks missing or out of date - registering ...
-rem Register through PowerShell: it works without elevation and allows the
-rem "start when available" setting, so a run missed while the PC was off is
-rem caught up later. [char]34 is a double quote, which keeps this command
-rem free of nested quotes. The task action goes through run-hidden.vbs
-rem (wscript.exe) so the runs happen in a hidden window - wscript is a
-rem GUI-subsystem host and the vbs starts cmd with window style 0.
+rem Register through PowerShell: no elevation needed and it supports
+rem StartWhenAvailable (catch up a run missed while the PC was off). [char]34
+rem is a double quote, which avoids nested quotes. The action goes through
+rem run-hidden.vbs: wscript is a GUI-subsystem host, so cmd starts hidden.
 set "PS_SCRIPT_DIR=%SCRIPT_DIR%"
 set "PSREG=$d=$env:PS_SCRIPT_DIR;$x=[char]34;"
 set "PSREG=%PSREG%$arg=$x+$d+'\run-hidden.vbs'+$x+' '+$x+$d+'\checkin.bat --auto'+$x;"
@@ -324,17 +301,15 @@ set "PSREG=%PSREG%$p=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType
 set "PSREG=%PSREG%$t=@();foreach($h in '08:45','11:45','14:45','17:45','20:45','23:45'){$t+=New-ScheduledTaskTrigger -Daily -At $h};"
 set "PSREG=%PSREG%Register-ScheduledTask -TaskName '%TASK_DAILY%' -Action $a -Settings $s -Principal $p -Trigger $t -Force -ErrorAction Stop|Out-Null;"
 set "PSREG=%PSREG%Register-ScheduledTask -TaskName '%TASK_STARTUP%' -Action $a -Settings $s -Principal $p -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME) -Force -ErrorAction Stop|Out-Null;"
-rem The resume task needs an EVENT trigger, which New-ScheduledTaskTrigger cannot
-rem express, so it comes from an XML template. [IO.File]::ReadAllText reads it
-rem without BOM surprises; $d is the project folder reused from above.
+rem The resume task needs an EVENT trigger, which New-ScheduledTaskTrigger
+rem cannot express, so it comes from the XML template. $d = project folder.
 set "PS_RESUME_XML=%SCRIPT_DIR%\scheduled-task.resume.xml"
 set "PSREG=%PSREG%$rx=[IO.File]::ReadAllText($env:PS_RESUME_XML);"
 set "PSREG=%PSREG%$rx=$rx.Replace('__CHECKIN_VBS__',$d+'\run-hidden.vbs').Replace('__CHECKIN_BAT__',$d+'\checkin.bat --auto').Replace('__USER__',$env:USERNAME);"
 set "PSREG=%PSREG%Register-ScheduledTask -TaskName '%TASK_RESUME%' -Xml $rx -Force -ErrorAction Stop|Out-Null"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "%PSREG%" >nul 2>&1
-rem Judge the registration by the command's own exit code first. :tasks_ok only
-rem checks that a task exists and points here, so a FAILED re-register leaves the
-rem previous definition in place and would be reported as success.
+rem Judge by the command's own exit code: :tasks_ok only checks that a task
+rem exists and points here, so a FAILED re-register would look like success.
 set "PSREG_RC="
 if errorlevel 1 set "PSREG_RC=1"
 call :now
@@ -432,13 +407,10 @@ if defined RC exit /b %RC%
 exit /b 0
 
 :pause_if_double_clicked
-rem Pause only when Explorer started this file. Its command line is
-rem   cmd.exe /c ""X:\path\checkin.bat" "   - note the trailing space.
-rem A scheduled task runs
-rem   cmd.exe /c "X:\path\checkin.bat"      - no trailing space.
-rem Probing CMDCMDLINE for the path alone matches BOTH, which used to leave
-rem triggered runs waiting on a keypress forever. The quotes are stripped
-rem first, then only a trailing space counts.
+rem Pause only when Explorer started this file: its command line ends with a
+rem trailing space (cmd.exe /c ""X:\path\checkin.bat" "), while a scheduled
+rem task's does not. Matching on the path alone hits both, which used to leave
+rem triggered runs waiting on a keypress forever.
 set "DBLCLK="
 set "CMDL=%CMDCMDLINE:"=%"
 if "%CMDL:~-1%"==" " set "DBLCLK=1"
