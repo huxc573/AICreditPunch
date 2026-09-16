@@ -215,14 +215,49 @@ def _fmt_num(value: Any) -> str:
     return f"{num:,.2f}"
 
 
-def _fmt_credit(today: Optional[int] = None, streak: Optional[int] = None,
-                balance: Any = None) -> str:
+def _int_of(value: Any) -> Optional[int]:
+    """整数取值：bool / 非数值一律 None（`0` 原样返回，是否省略交给调用方）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _md_of(value: Any) -> str:
+    """报文时间戳取月日：`2026-09-16 00:00:00` → `09-16`；识别不了返回空串。"""
+    text = clean_text(value)
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[5:10]
+    return ""
+
+
+def _date_of(value: Any) -> Optional[date]:
+    """报文时间戳取日期；识别不了返回 None。"""
+    try:
+        return datetime.strptime(clean_text(value)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _window_note(active: Any, end: Any, today: Optional[date] = None) -> str:
+    """活动窗口补充说明：`（剩 13 天，进行中）` / `（今天截止）` / `（已结束）`；无可用信息返回空串。"""
+    notes: List[str] = []
+    stop = _date_of(end)
+    if stop is not None:
+        left = (stop - (today or date.today())).days
+        if left > 0:
+            notes.append(f"剩 {left} 天")
+        elif left == 0:
+            notes.append("今天截止")
+    if isinstance(active, bool):
+        notes.append("进行中" if active else "已结束")
+    return f"（{'，'.join(notes)}）" if notes else ""
+
+
+def _fmt_credit(today: Optional[int] = None, balance: Any = None) -> str:
     """积分明细文本（中文）；字段缺失自动省略，保证两个平台写法一致。"""
     items = []
     if today is not None:
         items.append(f"本次 +{_fmt_num(today)}")
-    if streak is not None:
-        items.append(f"连续 {streak} 天")
     if balance is not None:
         items.append(f"当前积分余额 {_fmt_num(balance)}")
     return "，".join(items)
@@ -389,6 +424,14 @@ WB_ALREADY_WORDS = ("已签到", "已经签到", "already checked", "already cla
 WB_CHECKED_FLAGS = ("today_checked_in", "checked_in", "checkedIn", "claimed")
 WB_TODAY_CREDIT_KEYS = ("daily_credit", "today_credit")
 WB_STREAK_KEY = "streak_days"
+WB_STREAK_BONUS_KEY = "streak_bonus_credit"
+WB_DATES_KEY = "checkin_dates"
+WB_ACTIVITY_NAME_KEY = "activity_name"
+WB_SEASON_KEY = "season"
+WB_START_KEY = "start_time"
+WB_END_KEY = "end_time"
+WB_ACTIVE_KEY = "active"
+WB_REQUEST_ID_KEY = "requestId"
 WB_ACCOUNT_LABEL = "WorkBuddy账号"
 
 # 账号真实可用积分（与桌面端「设置 - 套餐与积分」同源）。
@@ -472,19 +515,48 @@ class WbReply:
         return False
 
     @property
-    def credits(self) -> Tuple[Optional[int], Optional[int]]:
-        """(本次积分, 连续天数)；缺失一律 None。"""
+    def paid_in(self) -> Tuple[Optional[int], Optional[int]]:
+        """(本次基础积分, 连签奖励积分)；缺失一律 None。"""
         scope = self._scope()
         today = next((scope[key] for key in WB_TODAY_CREDIT_KEYS if scope.get(key) is not None), None)
-        streak = scope.get(WB_STREAK_KEY)
-        return (
-            int(today) if isinstance(today, (int, float)) and not isinstance(today, bool) else None,
-            int(streak) if isinstance(streak, (int, float)) and not isinstance(streak, bool) and streak else None,
-        )
+        return _int_of(today), _int_of(scope.get(WB_STREAK_BONUS_KEY))
 
     @property
     def credit_text(self) -> str:
-        return _fmt_credit(*self.credits)
+        """`本次 +100（含连签奖励 +50），当前积分余额 …`；奖励为 0 或缺字段时不加括号。"""
+        today, bonus = self.paid_in
+        text = _fmt_credit(today=today)
+        if bonus:
+            text += f"（含连签奖励 +{_fmt_num(bonus)}）"
+        return text
+
+    @property
+    def streak(self) -> Optional[int]:
+        """本期连续签到天数（口径见 README §2.8：换期归零，跨期不累计）。"""
+        return _int_of(self._scope().get(WB_STREAK_KEY))
+
+    @property
+    def checkin_days(self) -> Optional[int]:
+        """本期已签到天数（`checkin_dates` 长度）；字段缺失 None。"""
+        dates = self._scope().get(WB_DATES_KEY)
+        return len(dates) if isinstance(dates, list) else None
+
+    @property
+    def activity_text(self) -> str:
+        """本期活动：`高校新生攻略 第9期 09-16 ~ 09-29（剩 13 天，进行中）`；字段缺失逐项省略。"""
+        scope = self._scope()
+        title = clean_text(scope.get(WB_ACTIVITY_NAME_KEY))
+        season = _int_of(scope.get(WB_SEASON_KEY))
+        head = " ".join(p for p in (title, f"第{season}期" if season else "") if p)
+        start, end = _md_of(scope.get(WB_START_KEY)), _md_of(scope.get(WB_END_KEY))
+        window = f"{start} ~ {end}" if start and end else (end or start)
+        note = _window_note(scope.get(WB_ACTIVE_KEY), scope.get(WB_END_KEY))
+        return " ".join(p for p in (head, window) if p) + note
+
+    @property
+    def request_id(self) -> str:
+        """报文 requestId（顶层字段）：出错时便于自查与反馈；缺失返回空串。"""
+        return clean_text((self.payload or {}).get(WB_REQUEST_ID_KEY))
 
     @property
     def reason(self) -> str:
@@ -502,6 +574,7 @@ class WorkBuddyClient:
         self.name = clean_text(record.get("name")) or WB_ACCOUNT_LABEL
         self.base = wb_validated_base(record.get("api_base"))
         self._headers = self._build_headers()
+        self._status: Optional[WbReply] = None      # 首次状态查询报文，供活动期字段兜底
 
     def _build_headers(self) -> Dict[str, str]:
         headers = {
@@ -596,14 +669,17 @@ class WorkBuddyClient:
     def check_in(self, status_only: bool) -> Tuple[bool, str]:
         self._say("查询签到状态", f"API={self.base}")
         status = self._call(WB_ROUTE_STATUS)
+        self._status = status
 
         if status.already_checked:
             return self._settle("今日已签到，本次无需签到", status)
 
+        # 未签到时 streak_days 还是签到前的旧值，这里只打活动期，连续天数留到结算行
+        self._say_activity(status)
         if status.accepted:
             self._say("今日未签到", status.credit_text)
         else:
-            self._say("状态查询异常", f"HTTP={status.http} code={status.code} {status.reason}")
+            self._say("状态查询异常", self._err_text(status))
             if status.http in (401, 403):
                 return self._outcome(False, self.name, "凭证失效或权限不足")
             if status_only:
@@ -619,7 +695,7 @@ class WorkBuddyClient:
         if claim.already_checked:
             return self._settle("今日已签到，本次无需签到", claim)
         if not claim.accepted:
-            self._say("签到失败", f"HTTP={claim.http} code={claim.code} {claim.reason}")
+            self._say("签到失败", self._err_text(claim))
             return self._outcome(False, self.name, "签到失败", claim.reason[:80])
 
         # 接口受理不等于到账：回查一次状态才算真的签到成功。
@@ -629,8 +705,29 @@ class WorkBuddyClient:
             return self._settle("签到成功", verify)
         return self._outcome(False, self.name, "领取后回查未确认签到")
 
+    def _say_activity(self, reply: WbReply, with_streak: bool = False,
+                      streak_from: Optional[WbReply] = None) -> None:
+        """本期活动行。连续天数只在签到结算时打（查询阶段是签到前的旧值，会少一天）；字段全缺则不打这行。"""
+        detail = reply.activity_text
+        if with_streak:
+            source = streak_from or reply
+            streak, days = source.streak, source.checkin_days
+            extra = [f"本期连续 {streak} 天" if streak else "",
+                     f"本期已签 {days} 天" if days else ""]
+            detail = "，".join(p for p in [detail, *extra] if p)
+        if detail:
+            self._say("本期活动", detail)
+
+    @staticmethod
+    def _err_text(reply: WbReply) -> str:
+        """异常行：HTTP 码 + 业务码 + 原因（+ requestId，便于自查与向官方反馈）。"""
+        text = f"HTTP={reply.http} code={reply.code} {reply.reason}"
+        return f"{text} requestId={reply.request_id}" if reply.request_id else text
+
     def _settle(self, state: str, reply: WbReply) -> Tuple[bool, str]:
-        """已签到 / 签到成功：日志与结果文案带上积分明细与账号真实余额。"""
+        """已签到 / 签到成功：先打本期活动与连续天数，再打积分明细与账号真实余额。"""
+        self._say_activity(reply if reply.activity_text else (self._status or reply),
+                           with_streak=True, streak_from=reply)
         balance, compose = self.balance()
         parts = [reply.credit_text]
         if balance:
