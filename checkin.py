@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 DEFAULT_TIMEOUT = 20
 DEFAULT_RETRIES = 2
 DEBUG = False
@@ -1796,26 +1796,37 @@ def save_state(state: Dict[str, Any]) -> None:
 
 def orchestrate(platform: str, results: List[Tuple[bool, str]], notify: Dict[str, Any],
                 cfg: Dict[str, Any]) -> Tuple[int, bool]:
-    """推送编排（去重 + 失败限流），返回 `(退出码, 本次是否为当日首次成功推送)`。"""
+    """推送编排（去重 + 失败限流），返回 `(退出码, 本次是否为当日首次签到成功)`。
+
+    `success_date_*` 记「当日签到成功」（`--today` 判读与当日首次弹窗都用它）；
+    `notify_date_*` 记「当日通知已送达」。两者分开是因为**只有真送达才算推送过** ——
+    旧实现丢弃 `send_notify` 返回值、无条件写标记，结果渠道没配或推送失败也打印
+    「今日已推送成功通知」，而且当天配好渠道后不会再补推。
+    """
     today = date.today().isoformat()
     state = load_state()
     key_ok = f"success_date_{platform}"
+    key_push = f"notify_date_{platform}"
     key_fail = f"fail_date_{platform}"
     label = PLATFORM_LABELS.get(platform, platform)
     success = all(ok for ok, _ in results)
     summary = "\n".join(t for _, t in results)
-    first_today = False
 
     if success:
-        if state.get(key_ok) == today:
+        first_today = state.get(key_ok) != today
+        state[key_ok] = today
+        if state.get(key_push) == today:
             log(f"{label} 今日已推送成功通知，本次静默跳过")
         else:
-            send_notify(notify, f"{label} 签到成功", summary)
-            state[key_ok] = today
-            first_today = True
+            if send_notify(notify, f"{label} 签到成功", summary):
+                state[key_push] = today
+                log(f"{label} 已推送签到通知")
+            else:
+                log(f"{label} 本次签到通知未送达（原因见上），下次运行会重试")
         if state.get(key_fail) == today:
             state["fail_count"] = 0
     else:
+        first_today = False
         if state.get(key_fail) != today:
             state[key_fail] = today
             state["fail_count"] = 0
@@ -1824,9 +1835,12 @@ def orchestrate(platform: str, results: List[Tuple[bool, str]], notify: Dict[str
         last = float(state.get("last_fail_ts", 0.0))
         now = time.time()
         if count < MAX_FAIL_ALERTS and (now - last) >= MIN_FAIL_INTERVAL:
-            send_notify(notify, f"{label} 签到失败", summary)
-            state["fail_count"] = count + 1
-            state["last_fail_ts"] = now
+            ok = send_notify(notify, f"{label} 签到失败", summary)
+            state["last_fail_ts"] = now          # 成败都推进节流窗口
+            if ok:
+                state["fail_count"] = count + 1  # 只有送达才占用当日的告警配额
+            else:
+                log(f"{label} 本次失败告警未送达（原因见上），{MIN_FAIL_INTERVAL // 60} 分钟后重试")
         else:
             log(f"{label} 失败，但今日已推送 {count} 条（上限 {MAX_FAIL_ALERTS}）或间隔不足，跳过推送")
     save_state(state)

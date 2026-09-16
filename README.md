@@ -1,6 +1,6 @@
 # AICreditPunch · 本地自动签到
 
-> **v1.8**（`VERSION` = `1.8.1` · 2026-09-16 12:30）· 变更见 [CHANGELOG.md](CHANGELOG.md) ·
+> **v1.8**（`VERSION` = `1.8.2` · 2026-09-16 20:55）· 变更见 [CHANGELOG.md](CHANGELOG.md) ·
 > 远程 [`huxc573/AICreditPunch`](https://github.com/huxc573/AICreditPunch)（公开，MIT）
 >
 > WorkBuddy + Trae 一体化签到 / 状态 / 积分查询，多账号，**单文件零依赖**（Python ≥ 3.8，无需 pip install）。
@@ -86,7 +86,7 @@ python checkin.py --init-workbuddy | --init-trae | --init
 ### 2.5 输出与日志
 
 ```text
-一体化每日签到脚本 v1.8.1 启动
+一体化每日签到脚本 v1.8.2 启动
 ===== WorkBuddy =====
 [示例账号] 查询签到状态；API=https://www.codebuddy.cn
 [示例账号] 本期活动；高校新生攻略 第9期 09-16~09-29（剩13天，进行中），本期连签1天，已签1天
@@ -211,7 +211,8 @@ Get-WinEvent -FilterHashtable @{LogName='System'; Id=107,507} -MaxEvents 20 | Se
 
 ### 3.3 一天跑 6 次安全吗
 
-安全：两平台**领取前都先查状态**，已签到直接跳过；通知同日只推一次、失败限流（每天 ≤3 条、间隔 ≥60 分钟）。
+安全：两平台**领取前都先查状态**，已签到直接跳过；通知同日只推一次（**只有真正送达才计入**，
+未送达下次运行补推）、失败限流（每天 ≤3 条已送达、间隔 ≥60 分钟）。
 高频运行只多几次请求，把「关机 / 断网漏签」的风险压到很低。
 
 ### 3.4 Linux / macOS
@@ -227,6 +228,8 @@ bat 相关特性（最新在前、弹记事本）不适用；Trae 依赖设备�
 
 内置统一决策（上游的 `WORKBUDDY_NOTIFY` 已删除，本脚本不读）：**当日首次签到成功推一次**；
 同日已签到**静默**；失败推送限流（`AICREDIT_MAX_FAIL_ALERTS` 条数 / `AICREDIT_FAIL_ALERT_INTERVAL` 分钟）。
+去重记在 `.checkin_state.json` 的 `notify_date_<平台>` —— **只有渠道真正收下才写入**，
+所以渠道没配或推送失败时日志会写「未送达」，并在下一次运行（含手动）补推。
 
 配置在 `config.json` 的 `notify` 段（说明文字写 `_` 开头字段，脚本忽略；改完即生效，无需重启任务）：
 
@@ -310,15 +313,15 @@ python checkin.py                # ④ 完整签到          --debug  # ⑦ 打�
 
 ```bash
 git status --short && git add -A && git commit -m "fix(bat): 一句话"
-git tag -a v1.8.1 -m "1.8.1: 一句话概要"
-git push origin main v1.8.1      # 远程有 TLS 中间人时加 -c http.sslVerify=false（一次性，别写全局）
+git tag -a v1.8.2 -m "1.8.2: 一句话概要"
+git push origin main v1.8.2      # 远程有 TLS 中间人时加 -c http.sslVerify=false（一次性，别写全局）
 ```
 
 提交信息 `<type>(<scope>): <描述>`，type 取 `feat` / `fix` / `perf` / `refactor` / `docs` / `chore` / `security`。
 发版检查：`--dry-run` 通过 + 手动跑一次能签到 → 无凭据入库 → `VERSION` / `CHANGELOG` / README 三处同步 →
 提交打标签按名推送 → 跑一次 `checkin.bat` 自动纠正任务路径。
 
-回滚：`git checkout v1.8.1 -- <文件>`（单文件）或 `git checkout -b hotfix/x v1.8.1`，回滚后同步 `VERSION` 与 CHANGELOG。
+回滚：`git checkout v1.8.2 -- <文件>`（单文件）或 `git checkout -b hotfix/x v1.8.2`，回滚后同步 `VERSION` 与 CHANGELOG。
 
 ## 8. 来源声明与致谢
 
