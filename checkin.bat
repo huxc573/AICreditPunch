@@ -11,8 +11,11 @@ rem    checkin.bat --logs        open the local log in notepad
 rem    checkin.bat --help        show usage
 rem
 rem  --auto is internal: the scheduled tasks pass it so a triggered run stays
-rem  silent - no console output and no pause. A manual run prints this run's
-rem  block on the console and pauses when it was started by a double-click.
+rem  silent - no console output and no pause. A manual run shows the same text
+rem  live on the console AND in the log: checkin.py prints every line to stdout
+rem  and, when ACP_RUN_LOG is set, appends it to that temp file too; this file
+rem  then prepends the temp file to the top of the real log. Under --auto the
+rem  bat also sets ACP_QUIET=1, so checkin.py skips the console entirely.
 rem
 rem  Three scheduled tasks are managed here (see README section 3.3):
 rem    AICreditPunch-Daily     six daily triggers, StartWhenAvailable
@@ -66,6 +69,9 @@ set "TASK_DAILY=AICreditPunch-Daily"
 set "TASK_STARTUP=AICreditPunch-Startup"
 set "TASK_RESUME=AICreditPunch-Resume"
 set "CHECKIN_TIMES=08:45 11:45 14:45 17:45 20:45 23:45"
+rem Host probed while waiting for the network: the real API host, so a
+rem successful probe means the check-in itself can go through.
+set "PROBE_HOST=www.workbuddy.cn"
 set "REG_FAILED="
 set "LOG_OPENED="
 
@@ -81,6 +87,8 @@ rem This is a goto, not an if-block: inside a block %1 is expanded before
 rem shift takes effect, so ARG1 would still read --auto and get forwarded.
 if /i not "%ARG1%"=="--auto" goto after_auto
 set "AUTO=1"
+rem ACP_QUIET tells checkin.py to skip the console and only fill the log copy.
+set "ACP_QUIET=1"
 shift
 set "ARG1=%~1"
 :after_auto
@@ -113,6 +121,11 @@ rem Tell checkin.py that this .bat owns the log: on the first successful
 rem check-in of the day it only leaves a flag file, and :open_log below
 rem opens the log AFTER this run has been prepended to the top.
 set "ACP_LOG_OWNER=bat"
+rem Same text on the console and in the log: python prints to this console and
+rem tees every line into ACP_RUN_LOG, which :publish_block prepends to the log.
+rem Delete any stale file first so a leftover temp file is never reused.
+set "ACP_RUN_LOG=%TMPLOG%"
+if exist "%TMPLOG%" del "%TMPLOG%" >nul 2>&1
 
 rem ---------------------------------------------------------------- task autosetup
 rem Register the tasks when they are missing OR still point at an old
@@ -124,20 +137,32 @@ if errorlevel 1 call :register_tasks
 
 rem ---------------------------------------------------------------- wait for network
 rem At boot/login WiFi is often not ready yet; the script itself only retries
-rem about 6s, so probe TCP 443 here and give up after ~120s instead of
-rem wasting this run.
+rem about 6s, so probe here first and give up after ~40s instead of wasting
+rem this run. ping is the fast gate: a native exe, no interpreter startup,
+rem answers within 1s. The old probe used TcpClient.Connect with NO timeout,
+rem so one unreachable host sat in SYN retries for ~20s per attempt and 24
+rem attempts could stall the run for many minutes. ICMP can be blocked where
+rem TCP still works, so a ping that never answers gets one TCP re-check with
+rem a HARD 3s timeout before we give up.
 set "N=0"
 if not defined AUTO echo Checking the network ...
 :waitnet
-powershell -NoProfile -Command "try { $c = New-Object System.Net.Sockets.TcpClient; $c.Connect('www.workbuddy.cn', 443); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
-if %ERRORLEVEL%==0 goto netok
+ping -n 1 -w 1000 %PROBE_HOST% >nul 2>&1
+if not errorlevel 1 goto netok
 set /a N+=1
-if %N% LSS 24 (
-    timeout /t 5 /nobreak >nul
+if %N% LSS 12 (
+    timeout /t 2 /nobreak >nul 2>&1
     goto waitnet
 )
+rem ping never answered: maybe ICMP is blocked rather than the net being down.
+rem "if not errorlevel 1" is used inside this block on purpose - %ERRORLEVEL%
+rem would be expanded when the block is parsed and would read a stale value.
+if exist "%PYEXE%" (
+    "%PYEXE%" -c "import socket; socket.create_connection(('%PROBE_HOST%', 443), 3).close()" >nul 2>&1
+    if not errorlevel 1 goto netok
+)
 call :now
-call :say WARN: network not reachable after ~120s, running anyway.
+call :say WARN: network not reachable after ~40s, running anyway.
 :netok
 
 call :now
@@ -145,15 +170,15 @@ if not exist "%PYEXE%" (
     call :say ERROR: python not found: %PYEXE%
     rem Blank line so this block stays separated from the previous run in the log.
     echo.>>"%TMPLOG%"
-    if not defined AUTO call :show_block
     call :publish_block
     if defined REG_FAILED call :open_log
     exit /b 127
 )
 
-"%PYEXE%" checkin.py>>"%TMPLOG%" 2>&1
+rem No redirection here: python writes straight to this console, so a manual run
+rem is live, and it tees the same lines into %TMPLOG% via ACP_RUN_LOG.
+"%PYEXE%" checkin.py
 set "RC=%ERRORLEVEL%"
-if not defined AUTO call :show_block
 call :publish_block
 rem Open the log when task registration failed, and also when checkin.py
 rem asked for it. Both happen AFTER the prepend above, so notepad shows
@@ -163,6 +188,10 @@ if exist "%OPEN_LOG_FLAG%" (
     del "%OPEN_LOG_FLAG%" >nul 2>&1
     call :open_log
 )
+if defined AUTO goto done_no_hint
+echo.
+echo Log written to the top of: "%LOGFILE%"
+:done_no_hint
 if not defined AUTO call :pause_if_double_clicked
 exit /b %RC%
 
@@ -230,25 +259,22 @@ if exist "%LOGFILE%" (
 del "%TMPLOG%" >nul 2>&1
 exit /b 0
 
-:show_block
-rem Print this run's block on the console. The log is UTF-8, so switch the
-rem console to UTF-8 first and restore the original code page afterwards.
-if not exist "%TMPLOG%" exit /b 0
-set "OLDCP="
-for /f "delims=" %%i in ('powershell -NoProfile -Command "(Get-Culture).TextInfo.OEMCodePage"') do set "OLDCP=%%i"
-chcp 65001 >nul 2>&1
-echo.
-type "%TMPLOG%"
-if defined OLDCP chcp %OLDCP% >nul 2>&1
-set "OLDCP="
-exit /b 0
-
 :say
-rem Write one ASCII-only line into this run's temp log.
-rem The timestamp prefix is dropped when :now could not produce an ASCII
-rem one, so a broken helper never injects localized text into the log.
-if defined NOW echo [%NOW%] %* >>"%TMPLOG%"
-if not defined NOW echo %* >>"%TMPLOG%"
+rem Write one ASCII-only line into this run's temp log, and echo it too on a
+rem manual run so the console and the log stay in step. The timestamp prefix is
+rem dropped when :now could not produce an ASCII one, so a broken helper never
+rem injects localized text into the log. Redirect first, then echo: the other
+rem order leaves a trailing space on every log line. Keep the message free of
+rem parentheses - echo inside this file must not look like a block.
+set "SAYLINE=%*"
+rem Bail out before echo: "echo" with an empty value prints "ECHO is on."
+if not defined SAYLINE exit /b 0
+if defined NOW set "SAYLINE=[%NOW%] %*"
+if defined AUTO goto say_log_only
+echo %SAYLINE%
+:say_log_only
+>>"%TMPLOG%" echo %SAYLINE%
+set "SAYLINE="
 exit /b 0
 
 :now

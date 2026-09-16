@@ -46,6 +46,7 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -105,6 +106,26 @@ LOG_FILE = log_file_path()
 # 前置到日志后再打开，记事本里才看得到最新一次运行（见 _request_open_log）。
 OPEN_LOG_FLAG = LOG_FILE.parent / ".AICreditPunch.openlog"
 
+# 本次运行的「输出副本」：由 checkin.bat 用环境变量 ACP_RUN_LOG 指定一个临时文件。
+# bat 要的是「控制台 + 日志」双份输出：Python 把每行实时打到控制台（--auto 隐藏运行时
+# 输出进的是隐藏控制台，等于静默），同时向该文件追加一份；bat 结束后把它前置到正式日志顶端。
+RUN_LOG_FILE = os.environ.get("ACP_RUN_LOG", "").strip()
+
+# 由 checkin.bat 在 --auto（计划任务触发）时设置：关掉控制台输出。隐藏窗口本来也看
+# 不到，但显式关掉更稳 —— 万一任务动作被改回可见的 cmd，也不会弹出一堆输出。
+CONSOLE_OUTPUT = os.environ.get("ACP_QUIET", "").strip().lower() not in ("1", "true", "yes", "on")
+
+
+def _append_run_log(line: str) -> None:
+    """把一行同时写进 bat 指定的运行副本文件；未指定或写失败都不影响主流程。"""
+    if not RUN_LOG_FILE:
+        return
+    try:
+        with open(RUN_LOG_FILE, "a", encoding="utf-8", newline="\r\n") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
 
 # --------------------------------------------------------------------------- #
 # 通用工具
@@ -112,13 +133,18 @@ OPEN_LOG_FLAG = LOG_FILE.parent / ".AICreditPunch.openlog"
 def log(message: str) -> None:
     # 空串 = 纯换行（用于块间留白），不输出时间戳前缀
     if not message:
-        print("", flush=True)
+        if CONSOLE_OUTPUT:
+            print("", flush=True)
+        _append_run_log("")
         return
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
-    try:
-        print(line, flush=True)
-    except UnicodeEncodeError:
-        print(line.encode("utf-8", errors="replace").decode("utf-8", errors="replace"), flush=True)
+    if CONSOLE_OUTPUT:
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            print(line.encode("utf-8", errors="replace").decode("utf-8", errors="replace"), flush=True)
+    # 控制台已经实时显示；再写一份给 bat 前置到正式日志
+    _append_run_log(line)
 
 
 def open_log_in_notepad() -> None:
@@ -2169,4 +2195,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        # 未捕获异常也要进运行副本，否则 bat 侧的日志会缺这一段（控制台仍由 Python 自己打印）
+        log("未捕获异常：" + traceback.format_exc())
+        raise
