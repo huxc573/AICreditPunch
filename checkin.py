@@ -239,13 +239,13 @@ def _date_of(value: Any) -> Optional[date]:
 
 
 def _window_note(active: Any, end: Any, today: Optional[date] = None) -> str:
-    """活动窗口补充说明：`（剩 13 天，进行中）` / `（今天截止）` / `（已结束）`；无可用信息返回空串。"""
+    """活动窗口补充说明：`（剩13天，进行中）` / `（今天截止）` / `（已结束）`；无可用信息返回空串。"""
     notes: List[str] = []
     stop = _date_of(end)
     if stop is not None:
         left = (stop - (today or date.today())).days
         if left > 0:
-            notes.append(f"剩 {left} 天")
+            notes.append(f"剩{left}天")
         elif left == 0:
             notes.append("今天截止")
     if isinstance(active, bool):
@@ -543,13 +543,13 @@ class WbReply:
 
     @property
     def activity_text(self) -> str:
-        """本期活动：`高校新生攻略 第9期 09-16 ~ 09-29（剩 13 天，进行中）`；字段缺失逐项省略。"""
+        """本期活动：`高校新生攻略 第9期 09-16~09-29（剩13天，进行中）`；字段缺失逐项省略。"""
         scope = self._scope()
         title = clean_text(scope.get(WB_ACTIVITY_NAME_KEY))
         season = _int_of(scope.get(WB_SEASON_KEY))
         head = " ".join(p for p in (title, f"第{season}期" if season else "") if p)
         start, end = _md_of(scope.get(WB_START_KEY)), _md_of(scope.get(WB_END_KEY))
-        window = f"{start} ~ {end}" if start and end else (end or start)
+        window = f"{start}~{end}" if start and end else (end or start)
         note = _window_note(scope.get(WB_ACTIVE_KEY), scope.get(WB_END_KEY))
         return " ".join(p for p in (head, window) if p) + note
 
@@ -712,8 +712,8 @@ class WorkBuddyClient:
         if with_streak:
             source = streak_from or reply
             streak, days = source.streak, source.checkin_days
-            extra = [f"本期连续 {streak} 天" if streak else "",
-                     f"本期已签 {days} 天" if days else ""]
+            extra = [f"本期连签{streak}天" if streak else "",
+                     f"已签{days}天" if days else ""]
             detail = "，".join(p for p in [detail, *extra] if p)
         if detail:
             self._say("本期活动", detail)
