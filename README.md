@@ -214,6 +214,9 @@ Get-WinEvent -FilterHashtable @{LogName='System'; Id=107,507} -MaxEvents 20 | Se
 安全：两平台**领取前都先查状态**，已签到直接跳过；通知同日只推一次（**只有真正送达才计入**，
 未送达下次运行补推）、失败限流（每天 ≤3 条已送达、间隔 ≥60 分钟）。
 高频运行只多几次请求，把「关机 / 断网漏签」的风险压到很低。
+**同一时刻只跑一个实例**：并发运行会抢日志（`:publish_block` 重写整个文件，另一个实例可能读到写了一半的
+行 → 日志出现截断的乱码行或重复行），所以 bat 用锁目录做互斥，拿不到锁的实例直接退出 ——
+另一个正在做同样的签到，不会漏签。超过 15 分钟的锁视为被强杀的残留，自动清掉后重试一次。
 
 ### 3.4 Linux / macOS
 
@@ -228,6 +231,8 @@ bat 相关特性（最新在前、弹记事本）不适用；Trae 依赖设备�
 
 内置统一决策（上游的 `WORKBUDDY_NOTIFY` 已删除，本脚本不读）：**当日首次签到成功推一次**；
 同日已签到**静默**；失败推送限流（`AICREDIT_MAX_FAIL_ALERTS` 条数 / `AICREDIT_FAIL_ALERT_INTERVAL` 分钟）。
+两个平台**合并成一条消息**（标题 `每日签到完成`，任一平台失败则为 `每日签到未全部成功`，正文含各账号结果），
+不会一天收到两条 —— 即使其中只有一个平台需要通知，也只发这一条。
 去重记在 `.checkin_state.json` 的 `notify_date_<平台>` —— **只有渠道真正收下才写入**，
 所以渠道没配或推送失败时日志会写「未送达」，并在下一次运行（含手动）补推。
 
@@ -241,7 +246,9 @@ bat 相关特性（最新在前、弹记事本）不适用；Trae 依赖设备�
 - 渠道 A `webhook.url` 按 URL 自动识别：企业微信群机器人（`qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…`）、
   Server酱（`sctapi.ftqq.com/XXX.send`）、钉钉 / 飞书 / Bark（见 `checkin.py` 的 `_send_webhook`）。
 - 渠道 B `wecom`：`gettoken` 换 `access_token` 再 `message/send`，可指定接收人。字段取值：
-  `corpid` 企业ID、`corpsecret` 自建应用 Secret、`agentid` AgentId、`touser` 接收人（`@all` 全员，多个用 `|`）。
+  `corpid` 企业ID、`corpsecret` 自建应用 Secret、`agentid` AgentId、`touser` 接收人（多个用 `|`）。
+  ⚠️ `@all` 是**应用可见范围内的所有人** —— 企业里有同事就会一并收到，只想发自己就填 **UserID**
+  （管理后台 → 通讯录能看到；`--test-notify` 不打印 UserID，可在后台「应用 → 可见范围」里核对）。
 - 两类可同时启用，任一留空则跳过；**只从 `config.json` 读**（环境变量覆盖未实现）。
 - 日志自动脱敏（`key=abc1***yz`；`corpsecret` / `access_token` → `***`）；通知失败只记日志，不影响签到。
 
@@ -288,7 +295,9 @@ python checkin.py                # ④ 完整签到          --debug  # ⑦ 打�
 | 唤醒后没补签 | 事件订阅没匹配上（现代待机常记别的 ID）→ 按 §3.2 命令确认后改订阅 |
 | 「Checking the network ...」停留较久 | 网络没起来正在等（最长约 5 分钟，见 §3.2） |
 | 计划任务「上次结果 0x1」/ `0x41301` | bat 执行失败（查 `PYEXE`、编码）/ 任务正在运行（正常） |
-| 日志中文乱码 | `.bat` 自己写的行必须纯 ASCII（v1.5.0 起已无 `%date%`/`%time%`） |
+| 日志某行被截断成乱码 / 内容重复 | 两个实例并发写日志（v1.8.3 起 bat 用锁目录互斥，见 §3.3）；
+旧日志里的坏行可手工删掉 |
+| 日志里出现旧版才有的 `%date%` 之类文本 | `.bat` 自己写的行必须纯 ASCII（v1.5.0 起已无 `%date%`/`%time%`） |
 | Trae 每次都报「今日已签到」但其实没签 | v1.7.0 及更早的判定 bug → 升级 |
 
 | 环境变量 | 默认 | 说明 |

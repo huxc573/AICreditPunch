@@ -95,8 +95,38 @@ if defined ARG1 (
 rem ---------------------------------------------------------------- default run
 cd /d "%SCRIPT_DIR%" || exit /b 1
 
-set "TMPLOG=%TEMP%\acp_run_%RANDOM%.tmp"
-set "NEWLOG=%TEMP%\acp_new_%RANDOM%.tmp"
+rem ---------------------------------------------------------------- single instance
+rem Two concurrent runs fight over the log: :publish_block rewrites the whole file
+rem (copy /b into a temp file, then move over the log), so an overlapping run can
+rem read a half-written log - that is how a truncated line with broken UTF-8 got
+rem into the log. mkdir is atomic (it either creates the directory or fails), so
+rem it doubles as a mutex. A run that cannot take the lock exits instead of
+rem racing: the other run is doing the same check-in, so nothing is missed. A lock
+rem older than 15 minutes is a leftover from a killed run and gets removed.
+set "LOCKDIR=%TEMP%\acp_checkin_%USERNAME%.lock"
+set "LOCKTRY=0"
+:lock_try
+mkdir "%LOCKDIR%" 2>nul
+if not errorlevel 1 goto lock_ok
+set /a LOCKTRY+=1
+if %LOCKTRY% GEQ 6 goto lock_old
+ping -n 3 127.0.0.1 >nul 2>&1
+goto lock_try
+
+:lock_old
+for /f "delims=" %%i in ('powershell -NoProfile -Command "if(((Get-Date)-(Get-Item -LiteralPath ($env:TEMP+'\acp_checkin_'+$env:USERNAME+'.lock')).LastWriteTime).TotalMinutes -gt 15){'stale'}else{'busy'}" 2^>nul') do set "LOCKSTATE=%%i"
+if /i not "%LOCKSTATE%"=="stale" goto lock_busy
+rd /s /q "%LOCKDIR%" >nul 2>&1
+mkdir "%LOCKDIR%" 2>nul
+if not errorlevel 1 goto lock_ok
+:lock_busy
+if not defined AUTO echo Another check-in is already running - this run exits.
+exit /b 0
+
+:lock_ok
+
+set "TMPLOG=%TEMP%\acp_run_%RANDOM%%RANDOM%.tmp"
+set "NEWLOG=%TEMP%\acp_new_%RANDOM%%RANDOM%.tmp"
 
 rem Tell checkin.py that this .bat owns the log: on the first successful
 rem check-in of the day it only leaves a flag file, and :open_log below
@@ -158,6 +188,7 @@ if not exist "%PYEXE%" (
     echo.>>"%TMPLOG%"
     call :publish_block
     if defined REG_FAILED call :open_log
+    call :release_lock
     exit /b 127
 )
 
@@ -178,9 +209,15 @@ echo.
 echo Log written to the top of: "%LOGFILE%"
 :done_no_hint
 if not defined AUTO call :pause_if_double_clicked
+call :release_lock
 exit /b %RC%
 
 rem ================================================================ subroutines
+
+:release_lock
+rem Drop the single-instance lock; harmless when it was never taken.
+rd /s /q "%LOCKDIR%" >nul 2>&1
+exit /b 0
 
 :forward
 rem A --option meant for checkin.py. Views such as --tasks / --today are

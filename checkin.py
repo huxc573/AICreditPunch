@@ -1794,13 +1794,14 @@ def save_state(state: Dict[str, Any]) -> None:
         log(f"状态写入失败（不影响签到）：{exc}")
 
 
-def orchestrate(platform: str, results: List[Tuple[bool, str]], notify: Dict[str, Any],
-                cfg: Dict[str, Any]) -> Tuple[int, bool]:
-    """推送编排（去重 + 失败限流），返回 `(退出码, 本次是否为当日首次签到成功)`。
+def orchestrate(platform: str, results: List[Tuple[bool, str]],
+                plan: List[Dict[str, Any]]) -> Tuple[int, bool]:
+    """更新签到状态，并把「本轮要发的通知」追加进 `plan`；不在这里发送。
 
+    两个平台的 `plan` 由 `flush_notify` 合并成一条消息发出，避免一天收到两条。
     `success_date_*` 记「当日签到成功」（`--today` 判读与当日首次弹窗都用它）；
-    `notify_date_*` 记「当日通知已送达」。两者分开是因为**只有真送达才算推送过** ——
-    旧实现丢弃 `send_notify` 返回值、无条件写标记，结果渠道没配或推送失败也打印
+    `notify_date_*` 记「当日通知已送达」—— 发送与状态分开是为了**只有真送达才算推送过**：
+    旧实现丢弃 `send_notify` 返回值、无条件写标记，渠道没配或推送失败也打印
     「今日已推送成功通知」，而且当天配好渠道后不会再补推。
     """
     today = date.today().isoformat()
@@ -1818,11 +1819,7 @@ def orchestrate(platform: str, results: List[Tuple[bool, str]], notify: Dict[str
         if state.get(key_push) == today:
             log(f"{label} 今日已推送成功通知，本次静默跳过")
         else:
-            if send_notify(notify, f"{label} 签到成功", summary):
-                state[key_push] = today
-                log(f"{label} 已推送签到通知")
-            else:
-                log(f"{label} 本次签到通知未送达（原因见上），下次运行会重试")
+            plan.append({"platform": platform, "label": label, "ok": True, "text": summary})
         if state.get(key_fail) == today:
             state["fail_count"] = 0
     else:
@@ -1835,16 +1832,39 @@ def orchestrate(platform: str, results: List[Tuple[bool, str]], notify: Dict[str
         last = float(state.get("last_fail_ts", 0.0))
         now = time.time()
         if count < MAX_FAIL_ALERTS and (now - last) >= MIN_FAIL_INTERVAL:
-            ok = send_notify(notify, f"{label} 签到失败", summary)
+            plan.append({"platform": platform, "label": label, "ok": False, "text": summary})
             state["last_fail_ts"] = now          # 成败都推进节流窗口
-            if ok:
-                state["fail_count"] = count + 1  # 只有送达才占用当日的告警配额
-            else:
-                log(f"{label} 本次失败告警未送达（原因见上），{MIN_FAIL_INTERVAL // 60} 分钟后重试")
         else:
             log(f"{label} 失败，但今日已推送 {count} 条（上限 {MAX_FAIL_ALERTS}）或间隔不足，跳过推送")
     save_state(state)
     return (0 if success else 1), first_today
+
+
+def flush_notify(notify: Dict[str, Any], plan: List[Dict[str, Any]]) -> bool:
+    """把两个平台的待发内容合并成**一条**消息发出，返回是否送达。
+
+    送达后才写标记：成功平台记 `notify_date_*`（同日不再重复推），失败平台占一条当日配额。
+    未送达则一个标记都不写 —— 下次运行（含手动）会重试。
+    """
+    if not plan:
+        return False
+    today = date.today().isoformat()
+    all_ok = all(item["ok"] for item in plan)
+    body = "\n".join(item["text"] for item in plan)
+    title = "每日签到完成" if all_ok else "每日签到未全部成功"
+    sent = send_notify(notify, title, body)
+    state = load_state()
+    if sent:
+        for item in plan:
+            if item["ok"]:
+                state[f"notify_date_{item['platform']}"] = today
+            else:
+                state["fail_count"] = int(state.get("fail_count", 0) or 0) + 1
+        log(_line("已推送签到通知", f"合并 {len(plan)} 条：{'，'.join(i['label'] for i in plan)}"))
+    else:
+        log("本次签到通知未送达（原因见上），下次运行会重试")
+    save_state(state)
+    return sent
 
 
 # =========================================================================== #
@@ -2220,12 +2240,16 @@ def main() -> int:
 
     rc = 0
     first_today = False
+    plan: List[Dict[str, Any]] = []          # 待推送内容；两平台跑完由 flush_notify 合并成一条
     if not args.trae_only and wb:
         log(f"===== {PLATFORM_WORKBUDDY} =====")
         results = [run_workbuddy(a, args.status_only, timeout, retries) for a in wb]
-        trc, first = orchestrate("workbuddy", results, notify, cfg)
-        rc |= trc
-        first_today = first_today or first
+        if args.status_only:
+            rc |= 0 if all(ok for ok, _ in results) else 1    # 只查询：不写状态、不推送
+        else:
+            trc, first = orchestrate("workbuddy", results, plan)
+            rc |= trc
+            first_today = first_today or first
     elif not args.trae_only and not wb:
         log(f"{PLATFORM_WORKBUDDY}：尚未初始化，请先运行 `{INIT_CMD_WORKBUDDY}`（导入本机登录凭据）")
 
@@ -2237,9 +2261,12 @@ def main() -> int:
             if updated:
                 _persist_trae(cfg, updated)
             results.append((ok, msg))
-        trc, first = orchestrate("trae", results, notify, cfg)
-        rc |= trc
-        first_today = first_today or first
+        if args.status_only:
+            rc |= 0 if all(ok for ok, _ in results) else 1    # 只查询：不写状态、不推送
+        else:
+            trc, first = orchestrate("trae", results, plan)
+            rc |= trc
+            first_today = first_today or first
     elif not args.workbuddy_only and not trae:
         log(f"{PLATFORM_TRAE}：尚未初始化，请先运行 `{INIT_CMD_TRAE}`（打开浏览器完成登录）")
 
@@ -2249,6 +2276,7 @@ def main() -> int:
         log("")
         return 1
 
+    flush_notify(notify, plan)
     log("本次脚本执行完毕。")
     log("")
     if first_today:
