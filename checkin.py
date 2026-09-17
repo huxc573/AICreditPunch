@@ -269,8 +269,8 @@ def _line(state: str, detail: str = "") -> str:
 
 
 def _result(platform: str, name: str, state: str, detail: str = "") -> str:
-    """对外结果文案（通知正文 / 汇总）：`{账号名}（{平台}）：{状态}；{明细}`。"""
-    return f"{name}（{platform}）：{state}" + (f"；{detail}" if detail else "")
+    """对外结果文案（通知正文）：`[{平台}] {账号名} {状态}；{明细}`，一个账号一行。"""
+    return f"[{platform}] {name} {state}" + (f"；{detail}" if detail else "")
 
 
 # --------------------------------------------------------------------------- #
@@ -1851,7 +1851,8 @@ def flush_notify(notify: Dict[str, Any], plan: List[Dict[str, Any]]) -> bool:
     today = date.today().isoformat()
     all_ok = all(item["ok"] for item in plan)
     body = "\n".join(item["text"] for item in plan)
-    title = "每日签到完成" if all_ok else "每日签到未全部成功"
+    stamp = datetime.now().strftime("%m-%d %H:%M:%S")
+    title = ("每日签到完成 " if all_ok else "每日签到未全部成功 ") + stamp
     sent = send_notify(notify, title, body)
     state = load_state()
     if sent:
