@@ -1839,7 +1839,7 @@ def orchestrate(platform: str, results: List[Tuple[bool, str]],
         if state.get(key_push) == today:
             log(f"{label} 今日通知已推送，跳过")
         else:
-            plan.append({"platform": platform, "label": label, "ok": True, "text": summary})
+            plan.append({"platform": platform, "ok": True, "text": summary})
         if state.get(key_fail) == today:
             state["fail_count"] = 0
     else:
@@ -1852,7 +1852,7 @@ def orchestrate(platform: str, results: List[Tuple[bool, str]],
         last = float(state.get("last_fail_ts", 0.0))
         now = time.time()
         if count < MAX_FAIL_ALERTS and (now - last) >= MIN_FAIL_INTERVAL:
-            plan.append({"platform": platform, "label": label, "ok": False, "text": summary})
+            plan.append({"platform": platform, "ok": False, "text": summary})
             state["last_fail_ts"] = now          # 成败都推进节流窗口
         else:
             log(f"{label} 失败，但今日已推送 {count} 条（上限 {MAX_FAIL_ALERTS}）或间隔不足，跳过推送")
@@ -1881,7 +1881,9 @@ def flush_notify(notify: Dict[str, Any], plan: List[Dict[str, Any]]) -> bool:
                 state[f"notify_date_{item['platform']}"] = today
             else:
                 state["fail_count"] = int(state.get("fail_count", 0) or 0) + 1
-        log(_line("已推送签到通知", f"合并 {len(plan)} 条：{'，'.join(i['label'] for i in plan)}"))
+        # 不报「合并 N 条：平台A，平台B」——几个平台、哪些账号就在上面的平台块里，
+        # 条数与来源一眼可见；这一行只说明「发出去了」。
+        log("已推送签到通知")
     else:
         log("本次签到通知未送达（原因见上），下次运行会重试")
     save_state(state)
