@@ -43,9 +43,11 @@ HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
 STATE_FILE = HERE / ".checkin_state.json"
 LOG_NAME = "AICreditPunch.log"
-# 日志行前缀的时间戳：`[26.09.17 09:33:06]`（两位年）。bat 的 `:now` 必须同款格式。
+# 日志行前缀的时间戳：本轮第一行（运行头）是 `[26.09.17 09:33:06]`，之后只留 `[09:33:08]` ——
+# 一次运行都在同一天，日期重复十几遍纯属占宽。bat 的 `:now` 仍写完整格式（bat 自己只写少数几行）。
 LOG_DAY_FMT = "%y.%m.%d"
-LOG_TS_FMT = LOG_DAY_FMT + " %H:%M:%S"
+LOG_TIME_FMT = "%H:%M:%S"
+LOG_TS_FMT = LOG_DAY_FMT + " " + LOG_TIME_FMT
 
 # 计划任务名 / 触发时刻 / 入口 bat —— 必须与 checkin.bat 顶部的同名常量保持一致，
 # 改一边就得改另一边。这里只用于「检查」，Python 侧不注册任务。
@@ -100,14 +102,21 @@ def _append_run_log(line: str) -> None:
 # --------------------------------------------------------------------------- #
 # 通用工具
 # --------------------------------------------------------------------------- #
+# 本轮是否已经打过带日期的运行头（正文行只留时分秒，见 LOG_TIME_FMT）。
+_HEADER_LOGGED = False
+
+
 def log(message: str) -> None:
-    # 空串 = 纯换行（用于块间留白），不输出时间戳前缀
+    global _HEADER_LOGGED
+    # 空串 = 纯换行（用于块间留白），不输出时间戳前缀，也不消耗运行头
     if not message:
         if CONSOLE_OUTPUT:
             print("", flush=True)
         _append_run_log("")
         return
-    line = f"[{datetime.now().strftime(LOG_TS_FMT)}] {message}"
+    fmt = LOG_TIME_FMT if _HEADER_LOGGED else LOG_TS_FMT
+    _HEADER_LOGGED = True
+    line = f"[{datetime.now().strftime(fmt)}] {message}"
     if CONSOLE_OUTPUT:
         try:
             print(line, flush=True)
@@ -262,7 +271,7 @@ def _fmt_credit(today: Optional[int] = None, balance: Any = None) -> str:
     if today is not None:
         items.append(f"本次 +{_fmt_num(today)}")
     if balance is not None:
-        items.append(f"积分余额{_fmt_num(balance)}")
+        items.append(f"余额{_fmt_num(balance)}")
     return "，".join(items)
 
 
@@ -526,7 +535,7 @@ class WbReply:
 
     @property
     def credit_text(self) -> str:
-        """`本次 +100（含连签奖励 +50），积分余额…`；奖励为 0 或缺字段时不加括号。"""
+        """`本次 +100（含连签奖励 +50），余额…`；奖励为 0 或缺字段时不加括号。"""
         today, bonus = self.paid_in
         text = _fmt_credit(today=today)
         if bonus:
@@ -558,10 +567,10 @@ class WbReply:
 
     @property
     def streak_text(self) -> str:
-        """账号级的 `连签2天，已签2天`；字段缺失逐项省略（只在签到结算后用，见 `_settle`）。"""
+        """账号级的 `连签2/已签2`；字段缺失逐项省略（只在签到结算后用，见 `_settle`）。"""
         streak, days = self.streak, self.checkin_days
-        return "，".join(p for p in [f"连签{streak}天" if streak else "",
-                                     f"已签{days}天" if days else ""] if p)
+        return "/".join(p for p in [f"连签{streak}" if streak else "",
+                                    f"已签{days}" if days else ""] if p)
 
     @property
     def request_id(self) -> str:
@@ -671,8 +680,8 @@ class WorkBuddyClient:
         base = total - reward - paid
         if base < 0:                      # 口径对不上就不报构成，避免误导
             return text, None
-        parts = [("套餐基础", base), ("平台奖励", reward), ("购买积分", paid)]
-        return text, ("，".join(f"{k}{_fmt_num(v)}" for k, v in parts if v) or None)
+        parts = [("套餐", base), ("奖励", reward), ("购买", paid)]
+        return text, ("+".join(f"{k}{_fmt_num(v)}" for k, v in parts if v) or None)
 
     def _say(self, state: str, detail: str = "") -> None:
         log(f"[{self.name}] {_line(state, detail)}")
@@ -688,7 +697,7 @@ class WorkBuddyClient:
         self._say_activity(status)
 
         if status.already_checked:
-            return self._settle("今日已签到（不重签）", status)
+            return self._settle("已签到（不重签）", status)
 
         if status.accepted:
             self._say("今日未签到", status.credit_text)
@@ -707,7 +716,7 @@ class WorkBuddyClient:
     def _claim(self) -> Tuple[bool, str]:
         claim = self._call(WB_ROUTE_CLAIM)
         if claim.already_checked:
-            return self._settle("今日已签到（不重签）", claim)
+            return self._settle("已签到（不重签）", claim)
         if not claim.accepted:
             self._say("签到失败", self._err_text(claim))
             return self._outcome(False, self.name, "签到失败", claim.reason[:80])
@@ -737,13 +746,13 @@ class WorkBuddyClient:
         balance, compose = self.balance()
         parts = [reply.credit_text]
         if balance:
-            parts.append(f"积分余额{balance}")
+            parts.append(f"余额{balance}")
         detail = "，".join(p for p in parts if p)
         # 日志：连签（账号级）与构成都接在同一行（连签自成一段，用 `；` 与明细隔开）；
         # 通知只要明细 —— 连签是当期活动口径，余额拆解也不该塞进推送。
         log_detail = "；".join(p for p in [reply.streak_text, detail] if p)
         if compose:
-            log_detail += f"，构成：{compose}"
+            log_detail += f"（{compose}）"
         self._say(state, log_detail)
         return self._outcome(True, self.name, state, detail)
 
@@ -1356,8 +1365,8 @@ def run_trae(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int,
     if _trae_status_checked(status[1]):
         bal = _trae_query_credits(acc, device_id, timeout, retries)
         txt = _fmt_credit(today=_trae_declared_credit(status[1]), balance=bal)
-        log(f"[{name}] {_line('今日已签到（不重签）', txt)}")
-        return True, _result(PLATFORM_TRAE, name, '今日已签到（不重签）', txt), None
+        log(f"[{name}] {_line('已签到（不重签）', txt)}")
+        return True, _result(PLATFORM_TRAE, name, '已签到（不重签）', txt), None
     if status_only:
         if status[1] is None:
             return False, _result(PLATFORM_TRAE, name, '状态查询失败', clean_text(status[2])[:80]), None
