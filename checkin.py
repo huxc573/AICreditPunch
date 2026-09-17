@@ -557,6 +557,13 @@ class WbReply:
         return " ".join(p for p in (head, window) if p) + note
 
     @property
+    def streak_text(self) -> str:
+        """账号级的 `连签2天，已签2天`；字段缺失逐项省略（只在签到结算后用，见 `_settle`）。"""
+        streak, days = self.streak, self.checkin_days
+        return "，".join(p for p in [f"连签{streak}天" if streak else "",
+                                     f"已签{days}天" if days else ""] if p)
+
+    @property
     def request_id(self) -> str:
         """报文 requestId（顶层字段）：出错时便于自查与反馈；缺失返回空串。"""
         return clean_text((self.payload or {}).get(WB_REQUEST_ID_KEY))
@@ -565,6 +572,11 @@ class WbReply:
     def reason(self) -> str:
         """失败原因：优先报文里的 message，其次网络层错误。"""
         return self.message or self.transport_error or "未知错误"
+
+
+# 平台级活动行只打一次：同平台的账号看到的是同一期活动（同一份 `activity_name` / `season`），
+# 每个账号再打一遍纯属重复。进程就是一次运行，所以这个标记不需要重置。
+_ACTIVITY_SHOWN: List[str] = []
 
 
 class WorkBuddyClient:
@@ -672,6 +684,8 @@ class WorkBuddyClient:
     def check_in(self, status_only: bool) -> Tuple[bool, str]:
         status = self._call(WB_ROUTE_STATUS)
         self._status = status
+        # 平台级活动行打在每个平台的第一行位置；整轮只打一次（见 `_ACTIVITY_SHOWN`）。
+        self._say_activity(status)
 
         if status.already_checked:
             return self._settle("今日已签到（不重签）", status)
@@ -686,8 +700,7 @@ class WorkBuddyClient:
                 return self._outcome(False, self.name, "状态查询失败")
 
         if status_only:
-            # 只查不领没有结算行，活动期在这里打；连续天数此时还是签到前的旧值（会少一天）
-            self._say_activity(status)
+            # 只查不领：活动行已在上面打过，连续天数此时还是签到前的旧值（会少一天），不打
             return self._outcome(True, self.name, "待签到")
         return self._claim()
 
@@ -705,18 +718,13 @@ class WorkBuddyClient:
             return self._settle("签到成功", verify)
         return self._outcome(False, self.name, "领取后回查未确认签到")
 
-    def _say_activity(self, reply: WbReply, with_streak: bool = False,
-                      streak_from: Optional[WbReply] = None) -> None:
-        """本期活动行。连续天数只在签到结算时打（查询阶段是签到前的旧值，会少一天）；字段全缺则不打这行。"""
+    @staticmethod
+    def _say_activity(reply: WbReply) -> None:
+        """平台级活动行（`WorkBuddy 本期活动；…`），整轮只打一次；字段全缺则不打这行。"""
         detail = reply.activity_text
-        if with_streak:
-            source = streak_from or reply
-            streak, days = source.streak, source.checkin_days
-            extra = [f"本期连签{streak}天" if streak else "",
-                     f"已签{days}天" if days else ""]
-            detail = "，".join(p for p in [detail, *extra] if p)
-        if detail:
-            self._say("本期活动", detail)
+        if detail and not _ACTIVITY_SHOWN:
+            _ACTIVITY_SHOWN.append(detail)
+            log(f"{PLATFORM_WORKBUDDY} " + _line("本期活动", detail))
 
     @staticmethod
     def _err_text(reply: WbReply) -> str:
@@ -725,16 +733,18 @@ class WorkBuddyClient:
         return f"{text} requestId={reply.request_id}" if reply.request_id else text
 
     def _settle(self, state: str, reply: WbReply) -> Tuple[bool, str]:
-        """已签到 / 签到成功：先打本期活动与连续天数，再打积分明细与账号真实余额。"""
-        self._say_activity(reply if reply.activity_text else (self._status or reply),
-                           with_streak=True, streak_from=reply)
+        """已签到 / 签到成功：打本账号的状态、连签天数与积分明细（活动行已在 `check_in` 打过）。"""
         balance, compose = self.balance()
         parts = [reply.credit_text]
         if balance:
             parts.append(f"积分余额{balance}")
         detail = "，".join(p for p in parts if p)
-        # 日志把构成接在同一行（`构成：…`），别再单开一行；通知只要明细，不推余额拆解。
-        self._say(state, detail + (f"，构成：{compose}" if compose else ""))
+        # 日志：连签（账号级）与构成都接在同一行（连签自成一段，用 `；` 与明细隔开）；
+        # 通知只要明细 —— 连签是当期活动口径，余额拆解也不该塞进推送。
+        log_detail = "；".join(p for p in [reply.streak_text, detail] if p)
+        if compose:
+            log_detail += f"，构成：{compose}"
+        self._say(state, log_detail)
         return self._outcome(True, self.name, state, detail)
 
 
@@ -1665,7 +1675,7 @@ def _send_wecom_app(notify: Dict[str, Any], title: str, content: str) -> Tuple[b
         return False, "gettoken 失败：" + (reason or "无响应") + ("（" + hint + "）" if hint else "")
     access = tok.get("access_token")
     body = {"touser": touser, "msgtype": "text", "agentid": int(agentid) if agentid.isdigit() else agentid,
-            "text": {"content": f"{title}\n\n{content}"}}
+            "text": {"content": f"{title}\n{content}"}}
     send_url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access}"
     st, pl, er = http_post(send_url, {}, body, DEFAULT_TIMEOUT, DEFAULT_RETRIES)
     if st == 200 and isinstance(pl, dict) and pl.get("errcode") == 0:
@@ -1680,7 +1690,7 @@ def _send_webhook(url: str, title: str, content: str) -> Tuple[bool, str]:
     url = clean_text(url)
     if not url:
         return False, ""
-    text = f"{title}\n\n{content}"
+    text = f"{title}\n{content}"
     if "qyapi.weixin.qq.com" in url and "webhook" in url:
         body = {"msgtype": "markdown", "markdown": {"content": text.replace("\n", "\n\n")}}
     elif "sctapi.ftqq.com" in url or "sc.ftqq.com" in url:
@@ -1848,7 +1858,7 @@ def flush_notify(notify: Dict[str, Any], plan: List[Dict[str, Any]]) -> bool:
     all_ok = all(item["ok"] for item in plan)
     body = "\n".join(item["text"] for item in plan)
     stamp = datetime.now().strftime(LOG_TS_FMT)
-    title = ("每日签到完成 " if all_ok else "每日签到未全部成功 ") + stamp
+    title = f"一体化每日签到脚本 v{VERSION} {stamp}" + ("" if all_ok else "（未全部成功）")
     sent = send_notify(notify, title, body)
     state = load_state()
     if sent:
