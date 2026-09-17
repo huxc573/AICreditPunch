@@ -670,7 +670,6 @@ class WorkBuddyClient:
         return ok, _result(PLATFORM_WORKBUDDY, name, state, detail)
 
     def check_in(self, status_only: bool) -> Tuple[bool, str]:
-        self._say("查询签到状态")
         status = self._call(WB_ROUTE_STATUS)
         self._status = status
 
@@ -690,7 +689,6 @@ class WorkBuddyClient:
             # 只查不领没有结算行，活动期在这里打；连续天数此时还是签到前的旧值（会少一天）
             self._say_activity(status)
             return self._outcome(True, self.name, "待签到")
-        self._say("提交签到")
         return self._claim()
 
     def _claim(self) -> Tuple[bool, str]:
@@ -702,7 +700,6 @@ class WorkBuddyClient:
             return self._outcome(False, self.name, "签到失败", claim.reason[:80])
 
         # 接口受理不等于到账：回查一次状态才算真的签到成功。
-        self._say("签到已受理，回查确认")
         verify = self._call(WB_ROUTE_STATUS)
         if verify.already_checked:
             return self._settle("签到成功", verify)
@@ -1345,7 +1342,6 @@ def run_trae(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int,
             _persist_trae(cfg, acc)
 
     headers = _trae_headers(acc, device_id)
-    log(f"[{name}] {_line('查询签到状态', f'device={device_id[:8]}***')}")
     status = http_post(TRAE_STATUS_URL, headers, {}, timeout, retries)
     if _trae_status_checked(status[1]):
         bal = _trae_query_credits(acc, device_id, timeout, retries)
@@ -1362,14 +1358,12 @@ def run_trae(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int,
     # 记下领取前的余额：本次实际到账只能靠前后差实测（平台声明的值会虚报）。
     balance_before = _trae_query_credits(acc, device_id, timeout, retries)
 
-    log(f"[{name}] {_line('提交签到')}")
     for attempt in range(TRAE_CLAIM_RETRIES):
         claim = http_post(TRAE_CLAIM_URL, headers, {}, timeout, retries)
         c = _code_of(claim[1])
         if _trae_claim_ok(claim[1]):
             # 受理 ≠ 到账：必须回查确认（与 WorkBuddy 同一口径）。少了这一步，
             # 就会出现「日志写签到成功、平台上其实没签上」的假绿。
-            log(f"[{name}] {_line('签到已受理，回查确认')}")
             settled = _trae_confirm(headers, timeout, retries)
             if settled is not None:
                 balance_after = _trae_query_credits(acc, device_id, timeout, retries)
@@ -1853,7 +1847,7 @@ def flush_notify(notify: Dict[str, Any], plan: List[Dict[str, Any]]) -> bool:
     today = date.today().isoformat()
     all_ok = all(item["ok"] for item in plan)
     body = "\n".join(item["text"] for item in plan)
-    stamp = datetime.now().strftime("%m-%d %H:%M:%S")
+    stamp = datetime.now().strftime(LOG_TS_FMT)
     title = ("每日签到完成 " if all_ok else "每日签到未全部成功 ") + stamp
     sent = send_notify(notify, title, body)
     state = load_state()
@@ -2025,32 +2019,16 @@ def _read_log_head(limit: int = 200_000) -> str:
         return ""
 
 
-def _log_message(line: str) -> str:
-    """日志行剥掉 `[26.09.17 09:33:06] ` 前缀后的正文；没有前缀就原样返回。"""
-    if line.startswith("[") and "] " in line:
-        return line[line.find("] ") + 2:]
-    return line
-
-
 def _log_blocks(text: str) -> List[List[str]]:
-    """把日志切成运行块（块与块之间用空行分隔），第 0 块就是最新一次运行。
-
-    同一次运行里平台之间也留了空行（`===== 平台 =====` 之前，见 `main` 的 `_block`），
-    那种空行不算块边界 —— 否则「最近一次运行」只会显示排在前面那个平台。
-    """
-    lines = text.splitlines()
+    """把日志切成运行块（块与块之间用空行分隔），第 0 块就是最新一次运行。"""
     blocks: List[List[str]] = []
     current: List[str] = []
-    for index, raw in enumerate(lines):
+    for raw in text.splitlines():
         if raw.strip():
             current.append(raw)
-            continue
-        nxt = lines[index + 1] if index + 1 < len(lines) else ""
-        if current and not _log_message(nxt.lstrip()).startswith("====="):
+        elif current:
             blocks.append(current)
             current = []
-        elif current:
-            current.append("")            # 运行内的平台分隔空行，原样留给「最近一次运行」摘要
     if current:
         blocks.append(current)
     return blocks
@@ -2126,7 +2104,7 @@ def show_today() -> int:
     if blocks:
         log("最近一次运行（日志顶部）：")
         for line in blocks[0][:40]:
-            log(f"  {line}" if line else "")
+            log(f"  {line}")
         if len(blocks[0]) > 40:
             log(f"  ...本块另有 {len(blocks[0]) - 40} 行，完整内容见日志文件")
     else:
@@ -2261,15 +2239,8 @@ def main() -> int:
     rc = 0
     first_today = False
     plan: List[Dict[str, Any]] = []          # 待推送内容；两平台跑完由 flush_notify 合并成一条
-    printed: List[str] = []                  # 已输出的平台块：块与块之间留空行，两平台挨着时扫日志分不开
-
-    def _block(title: str) -> None:
-        if printed:
-            log("")
-        printed.append(title)
-        log(title)
     if not args.trae_only and wb:
-        _block(f"===== {PLATFORM_WORKBUDDY} =====")
+        log(f"===== {PLATFORM_WORKBUDDY} =====")
         results = [run_workbuddy(a, args.status_only, timeout, retries) for a in wb]
         if args.status_only:
             rc |= 0 if all(ok for ok, _ in results) else 1    # 只查询：不写状态、不推送
@@ -2278,10 +2249,10 @@ def main() -> int:
             rc |= trc
             first_today = first_today or first
     elif not args.trae_only and not wb:
-        _block(f"{PLATFORM_WORKBUDDY}：尚未初始化，请先运行 `{INIT_CMD_WORKBUDDY}`（导入本机登录凭据）")
+        log(f"{PLATFORM_WORKBUDDY}：尚未初始化，请先运行 `{INIT_CMD_WORKBUDDY}`（导入本机登录凭据）")
 
     if not args.workbuddy_only and trae:
-        _block(f"===== {PLATFORM_TRAE} =====")
+        log(f"===== {PLATFORM_TRAE} =====")
         results: List[Tuple[bool, str]] = []
         for a in trae:
             ok, msg, updated = run_trae(a, args.status_only, timeout, retries, cfg)
@@ -2295,7 +2266,7 @@ def main() -> int:
             rc |= trc
             first_today = first_today or first
     elif not args.workbuddy_only and not trae:
-        _block(f"{PLATFORM_TRAE}：尚未初始化，请先运行 `{INIT_CMD_TRAE}`（打开浏览器完成登录）")
+        log(f"{PLATFORM_TRAE}：尚未初始化，请先运行 `{INIT_CMD_TRAE}`（打开浏览器完成登录）")
 
     if not wb and not trae:
         _print_init_hint()
