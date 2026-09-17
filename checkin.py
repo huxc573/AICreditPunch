@@ -656,8 +656,8 @@ class WorkBuddyClient:
         base = total - reward - paid
         if base < 0:                      # 口径对不上就不报构成，避免误导
             return text, None
-        return text, (f"套餐基础 {_fmt_num(base)}，平台奖励 {_fmt_num(reward)}，"
-                      f"购买积分 {_fmt_num(paid)}")
+        parts = [("套餐基础", base), ("平台奖励", reward), ("购买积分", paid)]
+        return text, ("，".join(f"{k} {_fmt_num(v)}" for k, v in parts if v) or None)
 
     def _say(self, state: str, detail: str = "") -> None:
         log(f"[{self.name}] {_line(state, detail)}")
@@ -667,15 +667,13 @@ class WorkBuddyClient:
         return ok, _result(PLATFORM_WORKBUDDY, name, state, detail)
 
     def check_in(self, status_only: bool) -> Tuple[bool, str]:
-        self._say("查询签到状态", f"API={self.base}")
+        self._say("查询签到状态")
         status = self._call(WB_ROUTE_STATUS)
         self._status = status
 
         if status.already_checked:
             return self._settle("今日已签到，本次无需签到", status)
 
-        # 未签到时 streak_days 还是签到前的旧值，这里只打活动期，连续天数留到结算行
-        self._say_activity(status)
         if status.accepted:
             self._say("今日未签到", status.credit_text)
         else:
@@ -686,6 +684,8 @@ class WorkBuddyClient:
                 return self._outcome(False, self.name, "状态查询失败")
 
         if status_only:
+            # 只查不领没有结算行，活动期在这里打；连续天数此时还是签到前的旧值（会少一天）
+            self._say_activity(status)
             return self._outcome(True, self.name, "待签到")
         self._say("提交签到")
         return self._claim()
@@ -1817,7 +1817,7 @@ def orchestrate(platform: str, results: List[Tuple[bool, str]],
         first_today = state.get(key_ok) != today
         state[key_ok] = today
         if state.get(key_push) == today:
-            log(f"{label} 今日已推送成功通知，本次静默跳过")
+            log(f"{label} 今日通知已推送，跳过")
         else:
             plan.append({"platform": platform, "label": label, "ok": True, "text": summary})
         if state.get(key_fail) == today:
