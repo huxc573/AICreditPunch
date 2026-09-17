@@ -697,10 +697,13 @@ class WorkBuddyClient:
         self._say_activity(status)
 
         if status.already_checked:
-            return self._settle("已签到（不重签）", status)
+            return self._settle("不重签", status)
 
         if status.accepted:
-            self._say("今日未签到", status.credit_text)
+            # 正常流程不报「未签到」：紧接着的结算行（`签到成功；连签…；本次 +100`）本来就说清了，
+            # 多一行只是噪声；只查不领没有结算行，那一句才有用。
+            if status_only:
+                self._say("今日未签到", status.credit_text)
         else:
             self._say("状态查询异常", self._err_text(status))
             if status.http in (401, 403):
@@ -716,7 +719,7 @@ class WorkBuddyClient:
     def _claim(self) -> Tuple[bool, str]:
         claim = self._call(WB_ROUTE_CLAIM)
         if claim.already_checked:
-            return self._settle("已签到（不重签）", claim)
+            return self._settle("不重签", claim)
         if not claim.accepted:
             self._say("签到失败", self._err_text(claim))
             return self._outcome(False, self.name, "签到失败", claim.reason[:80])
@@ -1365,11 +1368,13 @@ def run_trae(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int,
     if _trae_status_checked(status[1]):
         bal = _trae_query_credits(acc, device_id, timeout, retries)
         txt = _fmt_credit(today=_trae_declared_credit(status[1]), balance=bal)
-        log(f"[{name}] {_line('已签到（不重签）', txt)}")
-        return True, _result(PLATFORM_TRAE, name, '已签到（不重签）', txt), None
+        log(f"[{name}] {_line('不重签', txt)}")
+        return True, _result(PLATFORM_TRAE, name, '不重签', txt), None
     if status_only:
         if status[1] is None:
             return False, _result(PLATFORM_TRAE, name, '状态查询失败', clean_text(status[2])[:80]), None
+        # 与 WorkBuddy 同一口径：只查不领没有结算行，这里得自己把状态打出来
+        log(f"[{name}] {_line('今日未签到', _fmt_credit(today=_trae_declared_credit(status[1])))}")
         return True, _result(PLATFORM_TRAE, name, '待签到'), None
     if status[1] is None:
         log(f"[{name}] {_line('状态查询失败，仍尝试领取', clean_text(status[2])[:60])}")
