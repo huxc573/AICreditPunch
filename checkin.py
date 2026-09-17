@@ -2311,10 +2311,10 @@ def main() -> int:
         # 两个平台今天都已推送过 —— 本条通知没有要发的内容，本轮也不发。
         log("今日通知已推送，跳过")
     log("本次脚本执行完毕。")
-    log("")
     if first_today:
         log(f"当日首次签到，正在用记事本打开日志：{LOG_FILE}")
         _request_open_log()
+    log("")                                 # 运行块之间的分隔：必须压在本轮所有输出之后
     return rc
 
 
