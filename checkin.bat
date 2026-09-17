@@ -208,8 +208,12 @@ if defined AUTO goto done_no_hint
 echo.
 echo Log written to the top of: "%LOGFILE%"
 :done_no_hint
-if not defined AUTO call :pause_if_double_clicked
+rem Release the lock BEFORE the pause: everything that touches the log is already
+rem done, and a window left sitting at the "press any key" prompt would otherwise
+rem hold the lock for its whole 15-minute staleness window - the next scheduled
+rem run would then read it as busy and skip itself.
 call :release_lock
+if not defined AUTO call :pause_if_double_clicked
 exit /b %RC%
 
 rem ================================================================ subroutines
