@@ -43,6 +43,9 @@ HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
 STATE_FILE = HERE / ".checkin_state.json"
 LOG_NAME = "AICreditPunch.log"
+# 日志行前缀的时间戳：`[26.09.17 09:33:06]`（两位年）。bat 的 `:now` 必须同款格式。
+LOG_DAY_FMT = "%y.%m.%d"
+LOG_TS_FMT = LOG_DAY_FMT + " %H:%M:%S"
 
 # 计划任务名 / 触发时刻 / 入口 bat —— 必须与 checkin.bat 顶部的同名常量保持一致，
 # 改一边就得改另一边。这里只用于「检查」，Python 侧不注册任务。
@@ -104,7 +107,7 @@ def log(message: str) -> None:
             print("", flush=True)
         _append_run_log("")
         return
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    line = f"[{datetime.now().strftime(LOG_TS_FMT)}] {message}"
     if CONSOLE_OUTPUT:
         try:
             print(line, flush=True)
@@ -259,7 +262,7 @@ def _fmt_credit(today: Optional[int] = None, balance: Any = None) -> str:
     if today is not None:
         items.append(f"本次 +{_fmt_num(today)}")
     if balance is not None:
-        items.append(f"当前积分余额 {_fmt_num(balance)}")
+        items.append(f"积分余额{_fmt_num(balance)}")
     return "，".join(items)
 
 
@@ -523,7 +526,7 @@ class WbReply:
 
     @property
     def credit_text(self) -> str:
-        """`本次 +100（含连签奖励 +50），当前积分余额 …`；奖励为 0 或缺字段时不加括号。"""
+        """`本次 +100（含连签奖励 +50），积分余额…`；奖励为 0 或缺字段时不加括号。"""
         today, bonus = self.paid_in
         text = _fmt_credit(today=today)
         if bonus:
@@ -657,7 +660,7 @@ class WorkBuddyClient:
         if base < 0:                      # 口径对不上就不报构成，避免误导
             return text, None
         parts = [("套餐基础", base), ("平台奖励", reward), ("购买积分", paid)]
-        return text, ("，".join(f"{k} {_fmt_num(v)}" for k, v in parts if v) or None)
+        return text, ("，".join(f"{k}{_fmt_num(v)}" for k, v in parts if v) or None)
 
     def _say(self, state: str, detail: str = "") -> None:
         log(f"[{self.name}] {_line(state, detail)}")
@@ -672,7 +675,7 @@ class WorkBuddyClient:
         self._status = status
 
         if status.already_checked:
-            return self._settle("今日已签到，本次无需签到", status)
+            return self._settle("今日已签到（不重签）", status)
 
         if status.accepted:
             self._say("今日未签到", status.credit_text)
@@ -693,7 +696,7 @@ class WorkBuddyClient:
     def _claim(self) -> Tuple[bool, str]:
         claim = self._call(WB_ROUTE_CLAIM)
         if claim.already_checked:
-            return self._settle("今日已签到，本次无需签到", claim)
+            return self._settle("今日已签到（不重签）", claim)
         if not claim.accepted:
             self._say("签到失败", self._err_text(claim))
             return self._outcome(False, self.name, "签到失败", claim.reason[:80])
@@ -731,11 +734,10 @@ class WorkBuddyClient:
         balance, compose = self.balance()
         parts = [reply.credit_text]
         if balance:
-            parts.append(f"当前积分余额 {balance}")
+            parts.append(f"积分余额{balance}")
         detail = "，".join(p for p in parts if p)
-        self._say(state, detail)
-        if compose:
-            self._say("积分构成", compose)
+        # 日志把构成接在同一行（`构成：…`），别再单开一行；通知只要明细，不推余额拆解。
+        self._say(state, detail + (f"，构成：{compose}" if compose else ""))
         return self._outcome(True, self.name, state, detail)
 
 
@@ -1348,8 +1350,8 @@ def run_trae(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int,
     if _trae_status_checked(status[1]):
         bal = _trae_query_credits(acc, device_id, timeout, retries)
         txt = _fmt_credit(today=_trae_declared_credit(status[1]), balance=bal)
-        log(f"[{name}] {_line('今日已签到，本次无需签到', txt)}")
-        return True, _result(PLATFORM_TRAE, name, '今日已签到，本次无需签到', txt), None
+        log(f"[{name}] {_line('今日已签到（不重签）', txt)}")
+        return True, _result(PLATFORM_TRAE, name, '今日已签到（不重签）', txt), None
     if status_only:
         if status[1] is None:
             return False, _result(PLATFORM_TRAE, name, '状态查询失败', clean_text(status[2])[:80]), None
@@ -2023,16 +2025,32 @@ def _read_log_head(limit: int = 200_000) -> str:
         return ""
 
 
+def _log_message(line: str) -> str:
+    """日志行剥掉 `[26.09.17 09:33:06] ` 前缀后的正文；没有前缀就原样返回。"""
+    if line.startswith("[") and "] " in line:
+        return line[line.find("] ") + 2:]
+    return line
+
+
 def _log_blocks(text: str) -> List[List[str]]:
-    """把日志切成运行块（块与块之间用空行分隔），第 0 块就是最新一次运行。"""
+    """把日志切成运行块（块与块之间用空行分隔），第 0 块就是最新一次运行。
+
+    同一次运行里平台之间也留了空行（`===== 平台 =====` 之前，见 `main` 的 `_block`），
+    那种空行不算块边界 —— 否则「最近一次运行」只会显示排在前面那个平台。
+    """
+    lines = text.splitlines()
     blocks: List[List[str]] = []
     current: List[str] = []
-    for raw in text.splitlines():
+    for index, raw in enumerate(lines):
         if raw.strip():
             current.append(raw)
-        elif current:
+            continue
+        nxt = lines[index + 1] if index + 1 < len(lines) else ""
+        if current and not _log_message(nxt.lstrip()).startswith("====="):
             blocks.append(current)
             current = []
+        elif current:
+            current.append("")            # 运行内的平台分隔空行，原样留给「最近一次运行」摘要
     if current:
         blocks.append(current)
     return blocks
@@ -2076,8 +2094,9 @@ def show_today() -> int:
             log(f"[{label}] " + _line("今日有失败记录",
                                      f"已推送失败告警 {_to_int(state.get('fail_count'))} 条（上限 {MAX_FAIL_ALERTS}）"))
 
+    day_tag = today.strftime(LOG_DAY_FMT)
     runs_today = sum(1 for block in blocks for line in block
-                     if line.startswith(f"[{today_iso}") and "启动" in line)
+                     if line.startswith(f"[{day_tag} ") and "启动" in line)
     log(f"[运行记录] " + _line(f"日志中今日 {runs_today} 次",
                               "含计划任务触发与手动运行" if runs_today else "今天还没有运行记录"))
 
@@ -2107,7 +2126,7 @@ def show_today() -> int:
     if blocks:
         log("最近一次运行（日志顶部）：")
         for line in blocks[0][:40]:
-            log(f"  {line}")
+            log(f"  {line}" if line else "")
         if len(blocks[0]) > 40:
             log(f"  ...本块另有 {len(blocks[0]) - 40} 行，完整内容见日志文件")
     else:
@@ -2242,8 +2261,15 @@ def main() -> int:
     rc = 0
     first_today = False
     plan: List[Dict[str, Any]] = []          # 待推送内容；两平台跑完由 flush_notify 合并成一条
+    printed: List[str] = []                  # 已输出的平台块：块与块之间留空行，两平台挨着时扫日志分不开
+
+    def _block(title: str) -> None:
+        if printed:
+            log("")
+        printed.append(title)
+        log(title)
     if not args.trae_only and wb:
-        log(f"===== {PLATFORM_WORKBUDDY} =====")
+        _block(f"===== {PLATFORM_WORKBUDDY} =====")
         results = [run_workbuddy(a, args.status_only, timeout, retries) for a in wb]
         if args.status_only:
             rc |= 0 if all(ok for ok, _ in results) else 1    # 只查询：不写状态、不推送
@@ -2252,10 +2278,10 @@ def main() -> int:
             rc |= trc
             first_today = first_today or first
     elif not args.trae_only and not wb:
-        log(f"{PLATFORM_WORKBUDDY}：尚未初始化，请先运行 `{INIT_CMD_WORKBUDDY}`（导入本机登录凭据）")
+        _block(f"{PLATFORM_WORKBUDDY}：尚未初始化，请先运行 `{INIT_CMD_WORKBUDDY}`（导入本机登录凭据）")
 
     if not args.workbuddy_only and trae:
-        log(f"===== {PLATFORM_TRAE} =====")
+        _block(f"===== {PLATFORM_TRAE} =====")
         results: List[Tuple[bool, str]] = []
         for a in trae:
             ok, msg, updated = run_trae(a, args.status_only, timeout, retries, cfg)
@@ -2269,7 +2295,7 @@ def main() -> int:
             rc |= trc
             first_today = first_today or first
     elif not args.workbuddy_only and not trae:
-        log(f"{PLATFORM_TRAE}：尚未初始化，请先运行 `{INIT_CMD_TRAE}`（打开浏览器完成登录）")
+        _block(f"{PLATFORM_TRAE}：尚未初始化，请先运行 `{INIT_CMD_TRAE}`（打开浏览器完成登录）")
 
     if not wb and not trae:
         _print_init_hint()

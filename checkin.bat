@@ -295,13 +295,12 @@ set "SAYLINE="
 exit /b 0
 
 :now
-rem Locale-independent timestamp. "-Format s" is the sortable ISO form
-rem 2026-09-14T21:44:12 - no inner quotes, no localized names. Retry once,
-rem then give up quietly: %date% would corrupt the UTF-8 log.
+rem Locale-independent timestamp: yy.MM.dd HH:mm:ss -> 26.09.14 21:44:12,
+rem the same shape checkin.py writes to the log. Retry once, then give up
+rem quietly - %date% / %time% are localized and would corrupt the UTF-8 log.
 set "NOW="
-for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format s" 2^>nul') do set "NOW=%%i"
-if not defined NOW for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format s" 2^>nul') do set "NOW=%%i"
-if defined NOW set "NOW=%NOW:T= %"
+for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format 'yy.MM.dd HH:mm:ss'" 2^>nul') do set "NOW=%%i"
+if not defined NOW for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format 'yy.MM.dd HH:mm:ss'" 2^>nul') do set "NOW=%%i"
 exit /b 0
 
 :tasks_force
