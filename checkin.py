@@ -1815,10 +1815,12 @@ def save_state(state: Dict[str, Any]) -> None:
 
 
 def orchestrate(platform: str, results: List[Tuple[bool, str]],
-                plan: List[Dict[str, Any]]) -> Tuple[int, bool]:
+                plan: List[Dict[str, Any]],
+                skipped: List[str]) -> Tuple[int, bool]:
     """更新签到状态，并把「本轮要发的通知」追加进 `plan`；不在这里发送。
 
-    两个平台的 `plan` 由 `flush_notify` 合并成一条消息发出，避免一天收到两条。
+    两个平台的 `plan` 由 `flush_notify` 合并成一条消息发出，避免一天收到两条；今天已推送过的平台记进
+    `skipped`，由 `main` 在收尾处并成一句（一条通知只报一句，不再夹在平台块中间）。
     `success_date_*` 记「当日签到成功」（`--today` 判读与当日首次弹窗都用它）；
     `notify_date_*` 记「当日通知已送达」—— 发送与状态分开是为了**只有真送达才算推送过**：
     旧实现丢弃 `send_notify` 返回值、无条件写标记，渠道没配或推送失败也打印
@@ -1837,7 +1839,9 @@ def orchestrate(platform: str, results: List[Tuple[bool, str]],
         first_today = state.get(key_ok) != today
         state[key_ok] = today
         if state.get(key_push) == today:
-            log(f"{label} 今日通知已推送，跳过")
+            # 通知只有一条（两平台合并），它的去向也只报一句：交给收尾处的 `main` 统一打。
+            # 原先按平台各打一行，WorkBuddy 那句会被下一个 `===== Trae =====` 劈在两半。
+            skipped.append(label)
         else:
             plan.append({"platform": platform, "ok": True, "text": summary})
         if state.get(key_fail) == today:
@@ -2265,13 +2269,14 @@ def main() -> int:
     rc = 0
     first_today = False
     plan: List[Dict[str, Any]] = []          # 待推送内容；两平台跑完由 flush_notify 合并成一条
+    notify_skips: List[str] = []             # 今天已推送过、本轮不再发的平台（收尾处并成一句）
     if not args.trae_only and wb:
         log(f"===== {PLATFORM_WORKBUDDY} =====")
         results = [run_workbuddy(a, args.status_only, timeout, retries) for a in wb]
         if args.status_only:
             rc |= 0 if all(ok for ok, _ in results) else 1    # 只查询：不写状态、不推送
         else:
-            trc, first = orchestrate("workbuddy", results, plan)
+            trc, first = orchestrate("workbuddy", results, plan, notify_skips)
             rc |= trc
             first_today = first_today or first
     elif not args.trae_only and not wb:
@@ -2288,7 +2293,7 @@ def main() -> int:
         if args.status_only:
             rc |= 0 if all(ok for ok, _ in results) else 1    # 只查询：不写状态、不推送
         else:
-            trc, first = orchestrate("trae", results, plan)
+            trc, first = orchestrate("trae", results, plan, notify_skips)
             rc |= trc
             first_today = first_today or first
     elif not args.workbuddy_only and not trae:
@@ -2300,7 +2305,11 @@ def main() -> int:
         log("")
         return 1
 
-    flush_notify(notify, plan)
+    if plan:
+        flush_notify(notify, plan)
+    elif notify_skips:
+        # 两个平台今天都已推送过 —— 本条通知没有要发的内容，本轮也不发。
+        log("今日通知已推送，跳过")
     log("本次脚本执行完毕。")
     log("")
     if first_today:
