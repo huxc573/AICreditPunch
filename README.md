@@ -1,6 +1,6 @@
 # AICreditPunch · 本地自动签到
 
-> **v1.9**（`VERSION` = `1.9.0` · 2026-09-20 14:58）· 变更见 [CHANGELOG.md](CHANGELOG.md) ·
+> **v1.9**（`VERSION` = `1.9.1` · 2026-09-20 17:52）· 变更见 [CHANGELOG.md](CHANGELOG.md) ·
 > 远程 [`huxc573/AICreditPunch`](https://github.com/huxc573/AICreditPunch)（公开，MIT）
 >
 > WorkBuddy + Trae 一体化签到 / 状态 / 积分查询，多账号，**单文件零依赖**（Python ≥ 3.8，无需 pip install）。
@@ -346,6 +346,10 @@ python checkin.py                # ④ 完整签到          --debug  # ⑦ 打�
 - 推送前 `git status --short` 确认无凭据；推标签**只推 `v1.7.0` 及以上**，**不要** `git push --tags`。
 - 语义化版本：`MAJOR` 不兼容变更 / `MINOR` 新功能 / `PATCH` 修复。**版本号唯一来源是 `VERSION`**，
   标签 `v<X.Y.Z>`；`CHANGELOG.md` 段标题与 README 顶部都要带 **24 小时制到分钟**的时间。
+- 版本号怎么选：**重大新功能抬 `MINOR`**（`1.9.x` → `1.10.0`），**修 bug 只走 `PATCH`**（`1.9.0` → `1.9.1`），
+  不兼容变更才抬 `MAJOR`；别把功能塞进 `PATCH` 号里，也别为一次修复开 `MINOR`。
+- 每个版本**只打一个**标签 `vX.Y.Z`（附注标签）——不要另打 `v1.9` 这类短标签，
+  同一个提交挂两个名字会让远程标签列表出现重复版本。
 
 ```bash
 git status --short && git add -A && git commit -m "fix(bat): 一句话"

@@ -5,15 +5,19 @@
 
 ---
 
-## [未发布] - 2026-09-20 17:29
+## [v1.9.1] - 2026-09-20 17:52
 
-### 变更
+### 修复
 
-- **`--init-workbuddy` 兼容 WorkDaddy 多账号**：除桌面端 `workbuddy-desktop*.info` 外，还收 WorkDaddy（多账号切换壳）
-  给每个账号各存一份的 `%APPDATA%\WorkDaddy\accounts\<uid>.info`，一次导齐全账号，不再只导「当前登录」那一个。
-  同一账号的多份快照按 `uid` 归并、留 `expiresAt` 最大的那份；自动发现时逐账号比 token 的 `exp`，
-  比 `config.json` 里那份还旧的**不导**（免得拿旧快照盖掉新凭据），显式 `--auth-file` 时不做此判断。
-  未装 WorkDaddy 或只有单账号时，行为与原来一致。
+- **`--init-workbuddy` 只导「当前登录」那一个账号**：在 WorkDaddy（多账号切换壳）里切过号的机器上，
+  初始化只会拿到当前登录账号 —— WorkDaddy 把每个账号各存一份登录态在 `%APPDATA%\WorkDaddy\accounts\<uid>.info`，
+  之前没被扫到。现已一并收齐（桌面端 `workbuddy-desktop*.info` 那路不变），按 `uid` 归并、同一账号留 token 最新那份。
+  自动发现时逐账号比 token 的 `exp`，比 `config.json` 里那份还旧的**不导**（免得旧快照盖掉新凭据）；
+  显式 `--auth-file` 指定时不作此判断。未装 WorkDaddy、或只有单账号时，行为与原来一致。
+
+### 文档
+
+- 版本管理：清掉与 `vX.Y.Z` 指向同一提交的短标签 `v1.0`–`v1.8`（一个提交挂两个名字），每个版本只留一个 `vX.Y.Z` 附注标签。
 
 ## [v1.9.0] - 2026-09-20 14:58
 
