@@ -877,14 +877,20 @@ def run_workbuddy(acc: Dict[str, Any], status_only: bool, timeout: int, retries:
 # =========================================================================== #
 # WorkBuddy 初始化（独立实现：读取桌面端 auth 快照并合并进 config.json）
 #
-# 桌面端把登录态存在 `Data/Public/auth/workbuddy-desktop*.info` 快照里，
-# 结构为 `{"auth": {"accessToken": ...}, "accounts": [...]}`。本段只做三件事：
+# 桌面端把登录态存在 `Data/Public/auth/workbuddy-desktop*.info` 快照里；
+# WorkDaddy（多账号切换壳）另把每个账号各存一份到 `%APPDATA%\WorkDaddy\accounts\<uid>.info`。
+# 两者结构一致（`auth` + `account`/`accounts`），收齐后按 uid 合并。本段只做三件事：
 # 找快照 → 解析成账号记录 → 按 uid 合并进 config.json 的 accounts 段（幂等）。
 # =========================================================================== #
 WB_AUTH_ENV = "WORKBUDDY_AUTH_FILE"
 WB_AUTH_FILENAME = "workbuddy-desktop*.info"
+WB_SNAPSHOT_GLOB = "*.info"          # 显式给目录时收这个（WorkDaddy 的 <uid>.info 也认）
 WB_PRODUCT_DIRS = ("CodeBuddyExtension", "WorkBuddy")
 WB_AUTH_TAIL = ("Data", "Public", "auth")
+# WorkDaddy 是桌面端的多账号切换壳：切号时把每个账号的登录态各存一份（文件名就是 uid），
+# 所以这里能一次收齐全部账号，而不是只导「当前登录」那一个。
+WB_DADDY_DIR = "WorkDaddy"
+WB_DADDY_ACCOUNTS = ("accounts", "profiles/*/accounts")
 WB_DEFAULT_DOMAIN = "www.workbuddy.cn"
 
 
@@ -912,6 +918,25 @@ def wb_auth_dirs() -> List[Path]:
     suspects += [home.joinpath("Library", "Application Support", product, *WB_AUTH_TAIL)
                  for product in WB_PRODUCT_DIRS]
     return _dedupe_paths(suspects)
+
+
+def wb_daddy_auth_files() -> List[Path]:
+    """WorkDaddy 的多账号快照：`<数据目录>/WorkDaddy/accounts/*.info`（`profiles/*/accounts/` 下是副本）。
+
+    目录不存在就当没有，不报错 —— 没装 WorkDaddy 的用户走桌面端那一路，行为不变。
+    """
+    home = Path.home()
+    local = clean_text(os.environ.get("LOCALAPPDATA"))
+    roaming = clean_text(os.environ.get("APPDATA"))
+    roots = ([Path(roaming)] if roaming else []) + [Path(local) if local else home / "AppData" / "Local"]
+    files: List[Path] = []
+    for root in roots:
+        base = root / WB_DADDY_DIR
+        if not base.is_dir():
+            continue
+        for pattern in WB_DADDY_ACCOUNTS:
+            files.extend(sorted(base.glob(pattern + "/" + WB_SNAPSHOT_GLOB)))
+    return _dedupe_paths(files)
 
 
 class WbAuthSnapshot:
@@ -1016,14 +1041,14 @@ def _requested_auth_paths(explicit: Optional[str]) -> List[str]:
 
 
 def wb_auth_snapshots(explicit: Optional[str] = None) -> List[WbAuthSnapshot]:
-    """收集待解析的凭据快照（只列文件，不读内容）。"""
+    """收集待解析的凭据快照（只列文件，不读内容）：桌面端当前登录 + WorkDaddy 各账号。"""
     requested = _requested_auth_paths(explicit)
     candidates: List[Path] = []
     if requested:
         for value in requested:
             path = Path(value).expanduser()
             if path.is_dir():
-                candidates.extend(sorted(path.glob(WB_AUTH_FILENAME)))
+                candidates.extend(sorted(path.glob(WB_SNAPSHOT_GLOB)))
             elif path.is_file():
                 candidates.append(path)
             else:
@@ -1032,6 +1057,7 @@ def wb_auth_snapshots(explicit: Optional[str] = None) -> List[WbAuthSnapshot]:
         for directory in wb_auth_dirs():
             if directory.is_dir():
                 candidates.extend(sorted(directory.glob(WB_AUTH_FILENAME)))
+        candidates.extend(wb_daddy_auth_files())      # WorkDaddy 多账号
     resolved: List[Path] = []
     for path in candidates:
         try:
@@ -1152,8 +1178,23 @@ def setup_workbuddy(auth_file: Optional[str] = None) -> int:
             return 1
 
     snapshots = [snap for snap in wb_auth_snapshots(auth_file) if snap.load()]
+    # 同一账号可能有多份快照（桌面端当前登录 + WorkDaddy 的 accounts/ 与 profiles/ 副本）：
+    # 按 uid 归并成一行，留 token 最新（expiresAt 最大）的那份；顺序仍按发现先后，便于对照。
+    total_snapshots = len(snapshots)
+    by_key: Dict[str, WbAuthSnapshot] = {}
+    order: List[str] = []
+    for snap in snapshots:
+        record = snap.record or {}
+        key = clean_text(record.get("uid")) or _record_token(record) or str(snap.path)
+        if key in by_key:
+            if (snap.expires_at or 0.0) > (by_key[key].expires_at or 0.0):
+                by_key[key] = snap
+            continue
+        by_key[key] = snap
+        order.append(key)
+    snapshots = [by_key[key] for key in order]
     if not snapshots:
-        log("未发现本机 WorkBuddy 登录凭据（workbuddy-desktop.info）。")
+        log("未发现本机 WorkBuddy 登录凭据（桌面端 workbuddy-desktop.info 或 WorkDaddy 的 accounts/*.info）。")
         log("请先在本机登录 WorkBuddy 桌面端后重试；或从已登录电脑复制 config.json 到本目录；")
         log(f"也可用 `{INIT_CMD_WORKBUDDY} --auth-file <路径>` 或环境变量 {WB_AUTH_ENV} 指定凭据文件。")
         return 1
@@ -1162,11 +1203,31 @@ def setup_workbuddy(auth_file: Optional[str] = None) -> int:
     if cfg is None:
         return 1
 
-    imported = [snap.record for snap in snapshots if snap.record]
     store = WbAccountStore(cfg.get("accounts"))
+    # 自动发现时逐账号比 token 新旧：比 config 里那份还旧的就不导（显式 --auth-file 时按用户说的来）
+    known_exp: Dict[str, float] = {}
+    for record in store.records:
+        uid, token = WbAccountStore.identity(record)
+        if uid and uid not in known_exp:
+            known_exp[uid] = _jwt_expires_at(token) or 0.0
+    guard = not _requested_auth_paths(auth_file)
+
+    imported: List[Dict[str, Any]] = []
+    stale: List[str] = []
+    for snap in snapshots:
+        record = snap.record or {}
+        uid = clean_text(record.get("uid"))
+        if guard and uid and (snap.expires_at or 0.0) < known_exp.get(uid, 0.0):
+            stale.append(clean_text(record.get("name")) or uid)
+            continue
+        imported.append(record)
     updated, added = store.merge(imported)
 
-    log(f"发现可用账号：{len(imported)} 个")
+    log(f"发现可用账号：{len(imported)} 个"
+        + (f"（{total_snapshots} 份快照，同一账号取 token 最新的那份）"
+           if total_snapshots != len(imported) else ""))
+    if stale:
+        log(f"保留 config 里更新的凭据（{len(stale)} 个）：{"、".join(stale)}")
     for snap in snapshots:
         record = snap.record or {}
         log(f"- {record.get('name')}；UID={_masked_uid(record.get('uid') or '')}；"
@@ -1550,15 +1611,31 @@ def _persist_trae(cfg: Dict[str, Any], acc: Dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 # Trae 登录（浏览器 OAuth，移植参考仓库流程）
 # --------------------------------------------------------------------------- #
-def _jwt_subject(token: str) -> Optional[str]:
-    parts = token.split(".")
+def _jwt_payload(token: str) -> Optional[Dict[str, Any]]:
+    """解出 JWT 的 payload（不验签，只读 sub / exp）；解不了返回 None。"""
+    parts = (token or "").split(".")
     if len(parts) != 3:
         return None
     try:
         payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)).decode("utf-8"))
     except Exception:
         return None
-    return clean_text(payload.get("sub")) if isinstance(payload, dict) else None
+    return payload if isinstance(payload, dict) else None
+
+
+def _jwt_subject(token: str) -> Optional[str]:
+    payload = _jwt_payload(token)
+    return clean_text(payload.get("sub")) if payload else None
+
+
+def _jwt_expires_at(token: str) -> Optional[float]:
+    """JWT 里的 exp（秒）；读不到返回 None —— 用来判断两份凭据谁更新。"""
+    payload = _jwt_payload(token) or {}
+    raw = payload.get("exp")
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_json_param(raw: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -2270,10 +2347,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--init", action="store_true", help="依次初始化 WorkBuddy 与 Trae")
     p.add_argument("--init-workbuddy", action="store_true",
-                   help="初始化 WorkBuddy：导入本机桌面端登录凭据（可配合 --auth-file）")
+                   help="初始化 WorkBuddy：导入本机凭据（桌面端当前登录 + WorkDaddy 多账号）")
     p.add_argument("--init-trae", action="store_true",
                    help="初始化 Trae：浏览器 OAuth 登录")
-    p.add_argument("--auth-file", help="【--init-workbuddy】指定 workbuddy-desktop.info 路径（默认自动发现）")
+    p.add_argument("--auth-file",
+                   help="【--init-workbuddy】指定快照文件或目录（默认自动发现桌面端与 WorkDaddy 账号）")
     p.add_argument("--workbuddy-only", action="store_true", help="只跑 WorkBuddy 平台")
     p.add_argument("--trae-only", action="store_true", help="只跑 Trae 平台")
     p.add_argument("--status-only", action="store_true", help="只查询签到状态，不尝试领取")
