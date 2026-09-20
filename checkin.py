@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -33,6 +33,7 @@ VERSION = "1.9.0"
 DEFAULT_TIMEOUT = 20
 DEFAULT_RETRIES = 2
 DEFAULT_CONCURRENCY = 4      # 并发跑账号的线程数上限；1 = 串行
+STREAM_TICK = 0.2            # 并发收集的轮询间隔（秒）：活动行备好就出，不必等账号跑完
 DEBUG = False
 
 # 平台展示名与初始化命令（日志、通知、提示文案的统一口径）
@@ -108,13 +109,13 @@ def _append_run_log(line: str) -> None:
 # 本轮是否已经打过带日期的运行头（正文行只留时分秒，见 LOG_TIME_FMT）。
 _HEADER_LOGGED = False
 
-# 并发跑账号时，各线程先把输出行攒进自己的线程缓冲，回主线程按账号顺序打出来
-# （见 `_map_accounts` / `_flush_blocks`）：行序与串行一致，不至于谁先返回谁插队。
+# 并发跑账号时，各线程先把输出行攒进自己的线程缓冲，该账号一跑完就由主线程整块打出来
+# （见 `_map_accounts` / `_flush_block`）：签完一个出一个，不必等整平台跑完。
 _LOG_BUFFER = threading.local()
 
 
 def log(message: str) -> None:
-    """落一行输出。并发跑账号时先攒进线程缓冲，由主线程按账号顺序打（见 `_capture`）。"""
+    """落一行输出。并发跑账号时先攒进线程缓冲，等该账号跑完由主线程整块打（见 `_capture`）。"""
     buffered = getattr(_LOG_BUFFER, "lines", None)
     if buffered is not None:
         buffered.append(message)    # 只攒内容：时刻统一盖在打印那一下，免得块内时间倒序
@@ -623,7 +624,7 @@ class WbReply:
 # 平台级活动行只打一次：同平台的账号看到的是同一期活动（同一份 `activity_name` / `season`），
 # 每个账号再打一遍纯属重复。进程就是一次运行，所以这个标记不需要重置。
 _ACTIVITY_SHOWN: List[str] = []
-# 备好、待打印的活动行：并发跑时先查到状态的账号未必先打完，攒着由 `_flush_blocks` 提到首位。
+# 备好、待打印的活动行：并发跑时由主线程的收集循环随时打掉（要排在账号行前面）。
 _ACTIVITY_PENDING: List[str] = []
 # `_ACTIVITY_SHOWN` 的「查过没」与「记下来」要原子：并发下几个账号可能同时查到状态，
 # 不锁的话这行会重复打。
@@ -776,8 +777,8 @@ class WorkBuddyClient:
     def _say_activity(reply: WbReply) -> None:
         """平台级活动行（`WorkBuddy 本期活动；…`），整轮只打一次；字段全缺则不打这行。
 
-        并发跑时哪个账号先查到状态不确定、它又未必先打完，所以这里只备好文案，
-        由收尾的 `_flush_blocks` 提到本平台第一行；串行跑就直接打，位置天然正确。
+        这行是平台级的、要排在各账号行前面：并发跑时只备好文案，由主线程的收集循环
+        （`_map_accounts` 里的 `_flush_pending_activity`）先打掉；串行跑就直接打，位置天然正确。
         """
         detail = reply.activity_text
         with _ACTIVITY_LOCK:
@@ -814,21 +815,29 @@ class WorkBuddyClient:
 
 def _map_accounts(items: List[Any], work: Callable[[Any], Any],
                   workers: int) -> List[Tuple[Any, List[str]]]:
-    """并发跑各账号，**按输入顺序**返回 `[(返回值, 该账号的输出行), ...]`。
+    """并发跑各账号：**谁先跑完谁先打**，返回值仍按输入顺序 `[(返回值, 该账号的输出行), ...]`。
 
-    并发只吃网络等待：每个线程的输出先攒进自己的线程缓冲（见 `log`），回到主线程再按账号
-    顺序打出来 —— 行序与串行跑完全一致，不会谁先返回谁插队。
-    `workers <= 1` 或只有一个账号时退化成串行，此时输出行为空，`_flush_blocks` 什么都不打。
+    并发只吃网络等待：每个线程的输出先攒进自己的线程缓冲（见 `log`），该账号一跑完就由主线程
+    整块打出来 —— 所以是「签完一个出一个」，不必等整平台跑完。
+    返回值顺序仍是输入顺序：汇总、通知与退出码照旧按账号顺序。
+    `workers <= 1` 或只有一个账号时退化成串行（边跑边打，缓冲为空，`_flush_block` 不会被调）。
     """
     if workers <= 1 or len(items) <= 1:
         return [(work(item), []) for item in items]
     with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
         futures = [pool.submit(_capture, work, item) for item in items]
+        pending = set(futures)
+        while pending:
+            finished, pending = wait(pending, timeout=STREAM_TICK, return_when=FIRST_COMPLETED)
+            _flush_pending_activity()       # 活动行备好就出，不占账号行的位置
+            for future in finished:
+                _flush_block(future.result()[1])
+        _flush_pending_activity()           # 兜底：最后一刻才备好的活动行，别漏到下一个平台
         return [future.result() for future in futures]
 
 
-def _capture(work: Callable[[Any], Any], item: Any) -> Tuple[Any, List[Any]]:
-    """在线程缓冲下跑一个账号：返回它的返回值与攒下的输出行。"""
+def _capture(work: Callable[[Any], Any], item: Any) -> Tuple[Any, List[str]]:
+    """在线程缓冲下跑一个账号：返回它的返回值与攒下的输出行（主线程拿去按完成顺序打）。"""
     lines: List[str] = []
     _LOG_BUFFER.lines = lines
     try:
@@ -837,18 +846,21 @@ def _capture(work: Callable[[Any], Any], item: Any) -> Tuple[Any, List[Any]]:
         _LOG_BUFFER.lines = None
 
 
-def _flush_blocks(blocks: List[List[str]]) -> None:
-    """按账号顺序打印并发期间攒下的输出；平台级活动行提到本平台第一行。
+def _flush_block(lines: List[str]) -> None:
+    """打一个账号攒下的输出（它跑完时由主线程调用）：块内时间戳就是打完那一刻。"""
+    for message in lines:
+        _emit(datetime.now(), message)
 
-    攒的是内容、不是时刻：盖戳放在这里，块内时间天然递增（并发本来就是一起出结果）。
-    """
-    if blocks:
-        for text in _ACTIVITY_PENDING:
-            _emit(datetime.now(), text)
-    _ACTIVITY_PENDING.clear()
-    for lines in blocks:
-        for message in lines:
-            _emit(datetime.now(), message)
+
+def _flush_pending_activity() -> None:
+    """把备好的平台级活动行打掉（只备一次、只打一次）：它要排在账号行前面。"""
+    if not _ACTIVITY_PENDING:
+        return
+    with _ACTIVITY_LOCK:
+        pending = list(_ACTIVITY_PENDING)
+        _ACTIVITY_PENDING.clear()
+    for text in pending:
+        _emit(datetime.now(), text)
 
 
 def run_workbuddy(acc: Dict[str, Any], status_only: bool, timeout: int, retries: int) -> Tuple[bool, str]:
@@ -2371,7 +2383,6 @@ def main() -> int:
         log(f"===== {PLATFORM_WORKBUDDY} =====")
         captured = _map_accounts(
             wb, lambda a: run_workbuddy(a, args.status_only, timeout, retries), workers)
-        _flush_blocks([lines for _, lines in captured])
         results = [value for value, _ in captured]
         if args.status_only:
             rc |= 0 if all(ok for ok, _ in results) else 1    # 只查询：不写状态、不推送
@@ -2387,7 +2398,6 @@ def main() -> int:
         log(f"===== {PLATFORM_TRAE} =====")
         captured = _map_accounts(
             trae, lambda a: run_trae(a, args.status_only, timeout, retries, cfg), workers)
-        _flush_blocks([lines for _, lines in captured])
         results: List[Tuple[bool, str]] = []
         for value, _ in captured:
             ok, msg, updated = value
