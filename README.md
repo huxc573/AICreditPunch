@@ -1,6 +1,6 @@
 # AICreditPunch · 本地自动签到
 
-> **v1.9**（`VERSION` = `1.9.0` · 2026-09-20 12:43）· 变更见 [CHANGELOG.md](CHANGELOG.md) ·
+> **v1.9**（`VERSION` = `1.9.1` · 2026-09-20 13:05）· 变更见 [CHANGELOG.md](CHANGELOG.md) ·
 > 远程 [`huxc573/AICreditPunch`](https://github.com/huxc573/AICreditPunch)（公开，MIT）
 >
 > WorkBuddy + Trae 一体化签到 / 状态 / 积分查询，多账号，**单文件零依赖**（Python ≥ 3.8，无需 pip install）。
@@ -86,7 +86,7 @@ python checkin.py --init-workbuddy | --init-trae | --init
 ### 2.5 输出与日志
 
 ```text
-[26.09.17 09:33:06] 一体化每日签到脚本 v1.9.0 启动
+[26.09.17 09:33:06] 一体化每日签到脚本 v1.9.1 启动
 [09:33:06] ===== WorkBuddy =====
 [09:33:07] WorkBuddy 本期活动；高校新生攻略 第9期 09-16~09-29（剩12天，进行中）
 [09:33:08] [示例账号] 不重签；连签1/已签1；本次 +100，余额2,242.18（套餐142.18+奖励2,100）
@@ -101,6 +101,9 @@ python checkin.py --init-workbuddy | --init-trae | --init
   一次运行都在同一天，往上找一行就是日期。`checkin.bat` 自己写的那几行（网络告警等）仍是完整格式。
   **首行 / 末行**是运行起止标记（所有退出路径都有）；中间按 `===== 平台 =====` 分块，块内每行
   `[账号名] 状态；明细`，与账号无关的平台级提示才写成 `平台 状态；明细`。
+- **账号并行**：一轮里同平台的账号同时跑（默认 4 路，`AICREDIT_CONCURRENCY` 调 1–8，`1` = 串行），
+  但输出仍按账号顺序落盘（各线程先攒行、回主线程按序打）—— 同一块里几行的时间戳看着一样是正常的，
+  它们本来就是同时出的结果。
 - **只打结果行**：`查询签到状态` / `提交签到` / `签到已受理，回查确认` 这类进度行不落盘 —— 每行都有时间戳，
   卡在哪一步看时间差即可，出事由 `状态查询异常` / `签到失败` 行的 `HTTP/code/reason/requestId` 定位。
 - 状态词只有四个：`不重签`（查询时今天已签，本轮不重复领取）/ `签到成功` / `签到失败` / `状态查询异常`。
@@ -248,7 +251,7 @@ bat 相关特性（最新在前、弹记事本）不适用；Trae 依赖设备�
 
 内置统一决策（上游的 `WORKBUDDY_NOTIFY` 已删除，本脚本不读）：**当日首次签到成功推一次**；
 同日已签到**静默**；失败推送限流（`AICREDIT_MAX_FAIL_ALERTS` 条数 / `AICREDIT_FAIL_ALERT_INTERVAL` 分钟）。
-两个平台**合并成一条消息**：标题与启动横幅同款 —— `一体化每日签到脚本 v1.9.0 26.09.17 10:19:36`
+两个平台**合并成一条消息**：标题与启动横幅同款 —— `一体化每日签到脚本 v1.9.1 26.09.17 10:19:36`
 （脚本名 + 版本 + 时间到秒；任一平台失败时尾部加「（未全部成功）」），**标题与正文之间不留空行**；
 正文一个账号一行、行首用 `[]` 包裹平台名，如 `[WorkBuddy] 熊猫川 签到成功；本次 +100，余额1,534.12`，
 末行是那句合计（`合计：2 个账号全部成功，本次 +250`，见 §2.5）。
@@ -323,6 +326,7 @@ python checkin.py                # ④ 完整签到          --debug  # ⑦ 打�
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
 | `WORKBUDDY_TIMEOUT` / `WORKBUDDY_RETRIES` | `20` / `2` | 单次请求超时（5–120）/ 重试次数（0–5） |
+| `AICREDIT_CONCURRENCY` | `4` | 账号并发路数（1–8）；`1` = 串行，逐个跑 |
 | `WORKBUDDY_DEBUG` | `false` | 等价 `--debug` |
 | `WORKBUDDY_AUTH_FILE` | 空 | 仅供 `--init-workbuddy`（多个用 `;`） |
 | `AICREDIT_MAX_FAIL_ALERTS` / `AICREDIT_FAIL_ALERT_INTERVAL` | `3` / `60` | 失败通知每天上限 / 最小间隔（分钟） |
@@ -342,15 +346,15 @@ python checkin.py                # ④ 完整签到          --debug  # ⑦ 打�
 
 ```bash
 git status --short && git add -A && git commit -m "fix(bat): 一句话"
-git tag -a v1.9.0 -m "1.9.0: 一句话概要"
-git push origin main v1.9.0      # 远程有 TLS 中间人时加 -c http.sslVerify=false（一次性，别写全局）
+git tag -a v1.9.1 -m "1.9.1: 一句话概要"
+git push origin main v1.9.1      # 远程有 TLS 中间人时加 -c http.sslVerify=false（一次性，别写全局）
 ```
 
 提交信息 `<type>(<scope>): <描述>`，type 取 `feat` / `fix` / `perf` / `refactor` / `docs` / `chore` / `security`。
 发版检查：`--dry-run` 通过 + 手动跑一次能签到 → 无凭据入库 → `VERSION` / `CHANGELOG` / README 三处同步 →
 提交打标签按名推送 → 跑一次 `checkin.bat` 自动纠正任务路径。
 
-回滚：`git checkout v1.9.0 -- <文件>`（单文件）或 `git checkout -b hotfix/x v1.9.0`，回滚后同步 `VERSION` 与 CHANGELOG。
+回滚：`git checkout v1.9.1 -- <文件>`（单文件）或 `git checkout -b hotfix/x v1.9.1`，回滚后同步 `VERSION` 与 CHANGELOG。
 
 ## 8. 来源声明与致谢
 
