@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.8.3"
+VERSION = "1.9.0"
 DEFAULT_TIMEOUT = 20
 DEFAULT_RETRIES = 2
 DEBUG = False
@@ -283,6 +283,27 @@ def _line(state: str, detail: str = "") -> str:
 def _result(platform: str, name: str, state: str, detail: str = "") -> str:
     """对外结果文案（通知正文）：`[{平台}] {账号名} {状态}；{明细}`，一个账号一行。"""
     return f"[{platform}] {name} {state}" + (f"；{detail}" if detail else "")
+
+
+def _credit_of(text: str) -> Optional[int]:
+    """结果行里的「本次 +N」数字；失败行没有这一项，返回 None。
+
+    认的就是 `_fmt_credit` 那一种写法（自己刚拼出来的文案），别处不要复用这个口径。
+    """
+    matched = re.search(r"本次 \+([\d,]+)", text or "")
+    return int(matched.group(1).replace(",", "")) if matched else None
+
+
+def _run_summary(results: List[Tuple[bool, str]]) -> str:
+    """收尾一句：`合计：3 个账号全部成功，本次 +350`；本轮没有账号参战则返回空串。"""
+    if not results:
+        return ""
+    total = len(results)
+    ok = sum(1 for flag, _ in results if flag)
+    head = (f"合计：{total} 个账号全部成功" if ok == total
+            else f"合计：{total} 个账号，{ok} 成功 {total - ok} 失败")
+    got = sum(c for c in (_credit_of(msg) for _, msg in results) if c)
+    return head + (f"，本次 +{_fmt_num(got)}" if got else "")
 
 
 # --------------------------------------------------------------------------- #
@@ -1864,17 +1885,20 @@ def orchestrate(platform: str, results: List[Tuple[bool, str]],
     return (0 if success else 1), first_today
 
 
-def flush_notify(notify: Dict[str, Any], plan: List[Dict[str, Any]]) -> bool:
+def flush_notify(notify: Dict[str, Any], plan: List[Dict[str, Any]], summary: str = "") -> bool:
     """把两个平台的待发内容合并成**一条**消息发出，返回是否送达。
 
     送达后才写标记：成功平台记 `notify_date_*`（同日不再重复推），失败平台占一条当日配额。
     未送达则一个标记都不写 —— 下次运行（含手动）会重试。
+    `summary` 是收尾那句合计（`_run_summary`），接在正文末尾，与日志末尾同一句。
     """
     if not plan:
         return False
     today = date.today().isoformat()
     all_ok = all(item["ok"] for item in plan)
     body = "\n".join(item["text"] for item in plan)
+    if summary:
+        body += "\n" + summary
     stamp = datetime.now().strftime(LOG_TS_FMT)
     title = f"一体化每日签到脚本 v{VERSION} {stamp}" + ("" if all_ok else "（未全部成功）")
     sent = send_notify(notify, title, body)
@@ -2270,6 +2294,7 @@ def main() -> int:
     first_today = False
     plan: List[Dict[str, Any]] = []          # 待推送内容；两平台跑完由 flush_notify 合并成一条
     notify_skips: List[str] = []             # 今天已推送过、本轮不再发的平台（收尾处并成一句）
+    done: List[Tuple[bool, str]] = []        # 本轮走完签到流程的账号结果，收尾处汇成一句合计
     if not args.trae_only and wb:
         log(f"===== {PLATFORM_WORKBUDDY} =====")
         results = [run_workbuddy(a, args.status_only, timeout, retries) for a in wb]
@@ -2279,6 +2304,7 @@ def main() -> int:
             trc, first = orchestrate("workbuddy", results, plan, notify_skips)
             rc |= trc
             first_today = first_today or first
+            done.extend(results)
     elif not args.trae_only and not wb:
         log(f"{PLATFORM_WORKBUDDY}：尚未初始化，请先运行 `{INIT_CMD_WORKBUDDY}`（导入本机登录凭据）")
 
@@ -2296,6 +2322,7 @@ def main() -> int:
             trc, first = orchestrate("trae", results, plan, notify_skips)
             rc |= trc
             first_today = first_today or first
+            done.extend(results)
     elif not args.workbuddy_only and not trae:
         log(f"{PLATFORM_TRAE}：尚未初始化，请先运行 `{INIT_CMD_TRAE}`（打开浏览器完成登录）")
 
@@ -2305,11 +2332,14 @@ def main() -> int:
         log("")
         return 1
 
+    summary = _run_summary(done)
     if plan:
-        flush_notify(notify, plan)
+        flush_notify(notify, plan, summary)     # 通知正文末尾也带这一句
     elif notify_skips:
         # 两个平台今天都已推送过 —— 本条通知没有要发的内容，本轮也不发。
         log("今日通知已推送，跳过")
+    if summary:
+        log(summary)
     log("本次脚本执行完毕。")
     if first_today:
         log(f"当日首次签到，正在用记事本打开日志：{LOG_FILE}")
