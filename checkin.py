@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-VERSION = "1.9.1"
+VERSION = "1.9.0"
 DEFAULT_TIMEOUT = 20
 DEFAULT_RETRIES = 2
 DEFAULT_CONCURRENCY = 4      # 并发跑账号的线程数上限；1 = 串行
