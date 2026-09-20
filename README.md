@@ -1,6 +1,6 @@
 # AICreditPunch · 本地自动签到
 
-> **v1.9**（`VERSION` = `1.9.0` · 2026-09-20 12:43）· 变更见 [CHANGELOG.md](CHANGELOG.md) ·
+> **v1.9**（`VERSION` = `1.9.0` · 2026-09-20 14:58）· 变更见 [CHANGELOG.md](CHANGELOG.md) ·
 > 远程 [`huxc573/AICreditPunch`](https://github.com/huxc573/AICreditPunch)（公开，MIT）
 >
 > WorkBuddy + Trae 一体化签到 / 状态 / 积分查询，多账号，**单文件零依赖**（Python ≥ 3.8，无需 pip install）。
