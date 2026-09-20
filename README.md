@@ -44,10 +44,13 @@ Windows 上 `python` 不在 PATH 时，改 `checkin.bat` 里的
 在**已登录 WorkBuddy 桌面端**的机器上 `python checkin.py --init-workbuddy`。
 脚本**有界、不递归**扫描 `%LOCALAPPDATA%` / `%APPDATA%` 下的
 `{CodeBuddyExtension,WorkBuddy}\Data\Public\auth\`（macOS 见 `~/Library/Application Support/…`），
-找到 `workbuddy-desktop*.info` 后按 uid（无 uid 时按 token）去重合并；找不到**不报错**。
+外加 **WorkDaddy**（多账号切换壳）给每个账号各存一份的 `WorkDaddy\accounts\<uid>.info`，
+两个来源的快照按 uid（无 uid 时按 token）去重合并，同一账号留 token 最新那份。
+自动发现时若某账号在 `config.json` 里的凭据更新，则该份快照**不导**（`--auth-file` 指定时不判断）。
+未装 WorkDaddy、或只有单账号时行为不变；找不到凭据**不报错**。
 
 ```bash
-python checkin.py --init-workbuddy --auth-file C:\path\to\workbuddy-desktop.info  # 也可指定文件
+python checkin.py --init-workbuddy --auth-file C:\path\to\workbuddy-desktop.info  # 也可指定文件或目录
 # 或 set "WORKBUDDY_AUTH_FILE=<路径>"（多个用 ; 分隔）后重跑
 ```
 
